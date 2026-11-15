@@ -50,14 +50,14 @@ function App() {
       <div className="content">
         <div className="page-heading"><div><div className="eyebrow"><Sparkles size={13}/> CONNECTED SECURITY CONTEXT</div><h1>{view==="Overview"?"Agent security overview":view}</h1><p>See how agents, tools, permissions and evidence connect across your environment.</p></div><div className="heading-actions"><button className="button secondary" onClick={reset} disabled={busy}><RefreshCw size={15}/> Reset demo</button><button className="button primary" onClick={()=>{setView("Blast radius");const n=graph.nodes.find(n=>n.id==="tool-fetch");if(n)select(n);}}><Play size={15}/> Run simulation</button></div></div>
         {notice&&<div className="notice"><Activity size={15}/>{notice}<button onClick={()=>setNotice("")}>×</button></div>}
-        <section className="metrics">
+        <section className={"metrics "+(view==="Overview"?"":"hidden")}>
           <Metric icon={Bot} label="Connected agents" value={overview?.agents??"—"} sub="Across 3 teams" tone="violet"/>
           <Metric icon={Cable} label="MCP servers" value={overview?.mcpServers??"—"} sub="All connected" tone="teal"/>
           <Metric icon={Zap} label="Registered tools" value={overview?.tools??"—"} sub={(overview?.highRiskTools??0)+" high-risk tools"} tone="amber"/>
           <Metric icon={AlertTriangle} label="Failed findings" value={overview?.failedFindings??"—"} sub="Evidence-backed" tone="red"/>
         </section>
-        <div className="section-row"><div><h2>Connected environment</h2><p>Live relationships stored in your embedded Relate graph.</p></div><div className="graph-legend"><span><i className="legend-dot violet"/> Agent</span><span><i className="legend-dot teal"/> MCP</span><span><i className="legend-dot amber"/> Tool</span><span><i className="legend-dot lilac"/> Capability</span><span><i className="legend-dot blue"/> Policy</span></div></div>
-        <section className="graph-layout">
+        <div className={"section-row "+(["Agent inventory","Evidence"].includes(view)?"hidden":"")}><div><h2>Connected environment</h2><p>Live relationships stored in your embedded Relate graph.</p></div><div className="graph-legend"><span><i className="legend-dot violet"/> Agent</span><span><i className="legend-dot teal"/> MCP</span><span><i className="legend-dot amber"/> Tool</span><span><i className="legend-dot lilac"/> Capability</span><span><i className="legend-dot blue"/> Policy</span></div></div>
+        <section className={"graph-layout "+(["Agent inventory","Evidence"].includes(view)?"hidden":"")}>
           <div className="graph-card"><div className="graph-toolbar"><div className="graph-title"><Network size={16}/> RELATIONSHIP MAP <span>{graph.nodes.length} NODES · {graph.edges.length} EDGES</span></div><label className="search-box"><Search size={14}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Find a node..."/></label></div>
             <div className="graph-canvas"><div className="graph-columns"><span>AGENTS</span><span>INFRASTRUCTURE</span><span>TOOLS</span><span>CAPABILITIES</span><span>CONTROLS</span></div>
               <svg className="edges" viewBox="0 0 1180 880" preserveAspectRatio="none">{graph.edges.map((edge,i)=>{const a=positions[edge.source],b=positions[edge.target];if(!a||!b)return null;const active=impact&&(edge.source===selected?.id||edge.target===selected?.id||impact.affectedAgents?.some((x:any)=>x.id===edge.source||x.id===edge.target));return <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className={active?"edge highlighted":"edge"}/>;})}</svg>
@@ -71,11 +71,11 @@ function App() {
               <div className="inspector-foot"><span>GRAPH ENTITY ID</span><code>{selected.id}</code></div></>:<div className="empty-inspector"><Network size={28}/><p>Choose an agent, server, tool, capability, policy or evidence node to inspect its relationships.</p></div>}
           </aside>
         </section>
-        <div className="bottom-grid">
-          <section className="panel"><div className="panel-heading"><div><h2>Agent inventory</h2><p>Registered autonomous systems</p></div><button className="text-button" onClick={()=>setView("Agent inventory")}>View all <ArrowUpRight size={14}/></button></div>
+        <div className={"bottom-grid "+(view==="Graph explorer"?"hidden":"")+((view==="Agent inventory"||view==="Evidence")?" single":"")}>
+          <section className={"panel "+(view==="Evidence"?"hidden":"")}><div className="panel-heading"><div><h2>Agent inventory</h2><p>Registered autonomous systems</p></div><button className="text-button" onClick={()=>setView("Agent inventory")}>View all <ArrowUpRight size={14}/></button></div>
             {agents.map(a=><div className="agent-row" key={a.id}><div className="agent-icon"><Bot size={17}/></div><div className="agent-info"><b>{a.name}</b><small>{a.owner}</small></div><span className={"risk-badge "+a.risk.toLowerCase()}>{a.risk} RISK</span><span className="agent-status"><i/>{a.status}</span></div>)}
           </section>
-          <section className="panel"><div className="panel-heading"><div><h2>Recent evidence</h2><p>Signals linked to graph entities</p></div><button className="text-button" onClick={()=>setView("Evidence")}>View all <ArrowUpRight size={14}/></button></div>
+          <section className={"panel "+(view==="Agent inventory"?"hidden":"")}><div className="panel-heading"><div><h2>Recent evidence</h2><p>Signals linked to graph entities</p></div><button className="text-button" onClick={()=>setView("Evidence")}>View all <ArrowUpRight size={14}/></button></div>
             {evidence.slice(0,4).map(e=><div className="evidence-row" key={e.id}><div className={"evidence-icon "+e.result.toLowerCase()}>{e.result==="FAIL"?<AlertTriangle size={15}/>:<FileCheck2 size={15}/>}</div><div className="evidence-info"><b>{e.title}</b><small>{e.source} · {e.age}</small></div><span className={"result "+e.result.toLowerCase()}>{e.result}</span></div>)}
           </section>
         </div>
