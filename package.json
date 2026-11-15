@@ -1,0 +1,57 @@
+{
+  "name": "agent-trellis",
+  "version": "0.1.0",
+  "description": "Graph-powered security intelligence for AI agents, built with Neo4j Relate",
+  "main": "dist/server/index.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "start": "tsx src/server/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "neo4j",
+    "relate",
+    "ai-agents",
+    "security",
+    "graph-database",
+    "mcp"
+  ],
+  "author": "KUNDURUHIMANEESHREDDY",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KUNDURUHIMANEESHREDDY/agent-trellis.git"
+  },
+  "dependencies": {
+    "@relate/relate": "^1.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.0.6",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "supertest": "^7.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "koffi@2.16.4": true,
+    "esbuild@0.28.2": true
+  },
+  "type": "module"
+}
