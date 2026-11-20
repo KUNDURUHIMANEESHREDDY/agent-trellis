@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
-    "dev:client": "vite --host 0.0.0.0",
+    "dev:client": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "start": "tsx src/server/index.ts",
     "test": "vitest run",

@@ -3,10 +3,22 @@ import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
 import { AgentGraph } from "./graph";
+import { discoverMcpConfigurations } from "./discovery";
 
 export function createApp(graph: AgentGraph) {
   const app = express();
-  app.use(cors());
+  const apiPort = Number(process.env.PORT || 8787);
+  const allowedOrigins = new Set([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:" + apiPort,
+    "http://127.0.0.1:" + apiPort
+  ]);
+  app.use(cors({
+    origin(origin, callback) {
+      callback(null, !origin || allowedOrigins.has(origin));
+    }
+  }));
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_req, res) => res.json({ status: "ok", graph: "relate", persistent: true }));
@@ -14,6 +26,23 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/graph", (_req, res) => res.json(graph.getGraph()));
   app.get("/api/agents", (_req, res) => res.json(graph.getAgents()));
   app.get("/api/evidence", (_req, res) => res.json(graph.getEvidence()));
+  app.get("/api/discovery/mcp", (_req, res) => res.json(graph.getDiscoveredMcpServers()));
+  app.post("/api/discovery/mcp", (_req, res) => {
+    const configuredRoots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
+      .split(path.delimiter)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const discovery = discoverMcpConfigurations({
+      workspaceRoots: [process.cwd(), ...configuredRoots]
+    });
+    graph.syncMcpDiscovery(discovery);
+    return res.json({
+      scannedConfigFiles: discovery.scannedConfigPaths.length,
+      discoveredServers: discovery.servers.length,
+      diagnostics: discovery.diagnostics,
+      servers: graph.getDiscoveredMcpServers()
+    });
+  });
   app.get("/api/impact/:toolId", (req, res) => {
     const impact = graph.getImpact(req.params.toolId);
     if (!impact) return res.status(404).json({ error: "Tool not found" });

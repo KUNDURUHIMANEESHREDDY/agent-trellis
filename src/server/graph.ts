@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { Database, type Connection } from "@relate/relate";
+import type { MCPDiscoveryResult } from "./discovery";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
 export type GraphEdge = { source: string; target: string; type: string; properties: Record<string, unknown> };
@@ -112,7 +113,8 @@ export class AgentGraph {
     const counts = Object.fromEntries(rows.map((row) => [row.label, Number(row.total)]));
     const failed = this.query("MATCH (e:Evidence {result: 'FAIL'}) RETURN count(e) AS total").rows[0] as { total: number };
     const highRisk = this.query("MATCH (t:Tool) WHERE t.risk IN ['HIGH', 'CRITICAL'] RETURN count(t) AS total").rows[0] as { total: number };
-    return { agents: counts.Agent ?? 0, mcpServers: counts.MCPServer ?? 0, tools: counts.Tool ?? 0, capabilities: counts.Capability ?? 0, policies: counts.Policy ?? 0, evidence: counts.Evidence ?? 0, failedFindings: Number(failed?.total ?? 0), highRiskTools: Number(highRisk?.total ?? 0) };
+    const discovered = this.query("MATCH (s:MCPServer {discovered: true}) RETURN count(s) AS total").rows[0] as { total?: number } | undefined;
+    return { agents: counts.Agent ?? 0, mcpServers: counts.MCPServer ?? 0, discoveredMcpServers: Number(discovered?.total ?? 0), tools: counts.Tool ?? 0, capabilities: counts.Capability ?? 0, policies: counts.Policy ?? 0, evidence: counts.Evidence ?? 0, failedFindings: Number(failed?.total ?? 0), highRiskTools: Number(highRisk?.total ?? 0) };
   }
 
   getGraph() {
@@ -152,6 +154,71 @@ export class AgentGraph {
     this.query("MATCH (i:Incident {id: $incidentId}), (e:Evidence {id: $evidenceId}) CREATE (i)-[:SUPPORTED_BY]->(e)", { incidentId, evidenceId });
     this.checkpoint();
     return { incidentId, ...impact };
+  }
+
+  syncMcpDiscovery(discovery: MCPDiscoveryResult) {
+    const seenServerIds = new Set<string>();
+    const discoveredAt = new Date().toISOString();
+
+    for (const server of discovery.servers) {
+      seenServerIds.add(server.id);
+      const host = {
+        id: server.hostId,
+        name: server.hostName,
+        source: server.source,
+        configPath: server.configPath,
+        discovered: true,
+        lastDiscoveredAt: discoveredAt
+      };
+      const serverProperties = {
+        ...server,
+        discovered: true,
+        lastDiscoveredAt: discoveredAt,
+        status: "CONFIGURED"
+      };
+
+      this.query("MERGE (h:MCPHost {id: $id}) SET h += $props", { id: server.hostId, props: host });
+      this.query("MERGE (s:MCPServer {id: $id}) SET s += $props", { id: server.id, props: serverProperties });
+      this.query(
+        "MATCH (h:MCPHost {id: $hostId}), (s:MCPServer {id: $serverId}) MERGE (h)-[:CONFIGURES]->(s)",
+        { hostId: server.hostId, serverId: server.id }
+      );
+    }
+
+    const scannedPaths = new Set(discovery.scannedConfigPaths.map((value) => path.resolve(value)));
+    const existing = this.query(
+      "MATCH (s:MCPServer {discovered: true}) RETURN s.id AS id, s.configPath AS configPath"
+    ).rows as Array<{ id: string; configPath: string }>;
+
+    for (const item of existing) {
+      if (scannedPaths.has(path.resolve(item.configPath)) && !seenServerIds.has(item.id)) {
+        this.query("MATCH (s:MCPServer {id: $id}) DETACH DELETE s", { id: item.id });
+      }
+    }
+
+    const linkedHostRows = this.query(
+      "MATCH (h:MCPHost)-[:CONFIGURES]->(s:MCPServer {discovered: true}) RETURN DISTINCT h.id AS id"
+    ).rows as Array<{ id: string }>;
+    const linkedHostIds = new Set(linkedHostRows.map((row) => row.id));
+    const hosts = this.query("MATCH (h:MCPHost) RETURN h.id AS id").rows as Array<{ id: string }>;
+    for (const host of hosts) {
+      if (!linkedHostIds.has(host.id)) {
+        this.query("MATCH (h:MCPHost {id: $id}) DETACH DELETE h", { id: host.id });
+      }
+    }
+
+    this.checkpoint();
+  }
+
+  getDiscoveredMcpServers() {
+    const rows = this.query(
+      "MATCH (h:MCPHost)-[:CONFIGURES]->(s:MCPServer {discovered: true}) RETURN properties(h) AS host, properties(s) AS server ORDER BY h.name, s.name"
+    ).rows as Array<{ host: Record<string, unknown>; server: Record<string, unknown> }>;
+    return rows.map((row) => ({
+      ...row.server,
+      hostName: row.host.name,
+      hostSource: row.host.source
+    }));
   }
 
   reset() { return this.seed(); }

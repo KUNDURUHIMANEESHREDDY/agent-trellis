@@ -7,7 +7,7 @@ async function main() {
   await graph.initialize();
   const app = createApp(graph);
   const port = Number(process.env.PORT || 8787);
-  app.listen(port, () => {
+  app.listen(port, "127.0.0.1", () => {
     console.log(`AgentTrellis API listening on http://localhost:${port}`);
     console.log("Relate graph ready; persistent storage enabled.");
   });

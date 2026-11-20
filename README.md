@@ -16,6 +16,8 @@ A security finding is rarely isolated. A vulnerable MCP tool can affect several 
 - Blast-radius simulation for a compromised MCP tool.
 - Evidence-backed assessment records and graph query API.
 - Resettable demo dataset.
+- Read-only discovery of local MCP configuration from Claude Desktop/Code, Cursor, Windsurf, Copilot CLI and workspace `.mcp.json` files.
+- Discovered MCP host and server definitions are normalized and persisted in Relate; credential values are excluded.
 
 ## Requirements
 
@@ -32,6 +34,12 @@ npm run dev
 Open http://localhost:5173. The API runs on http://localhost:8787.
 
 The graph is stored under `.data/agent-trellis/`. It is persistent across restarts. Delete that directory only when you intentionally want to reset the local database; the dashboard also provides a reset action for the demo graph.
+
+### Local MCP discovery
+
+Call `POST /api/discovery/mcp` to scan known local configuration files, then `GET /api/discovery/mcp` to read the persisted inventory. AgentTrellis reads configuration metadata only: it does not launch configured processes, connect to MCP servers, or invoke tools. Credential values, command arguments, environment values and header values are not stored. The inventory retains only command names, argument counts, endpoint origins/paths, and environment/header key names.
+
+Discovery supports Claude Desktop, Claude Code user/local configuration, Cursor global/workspace configuration, Windsurf global configuration, GitHub Copilot CLI, and workspace-root `.mcp.json`. It scans the current working directory plus roots listed in `AGENT_TRELLIS_WORKSPACES`, separated by the operating system path delimiter. The API and development server bind to loopback because discovery reads files on the local machine.
 
 ## Scripts
 
@@ -62,4 +70,4 @@ This repository is a standalone project for the Relate by Neo4j hackathon. It is
 
 ## Status
 
-Early implementation. The current graph uses a deterministic demo dataset; live agent discovery, external MCP inspection and real execution-evidence ingestion are planned next.
+Early implementation. The graph contains a deterministic demo dataset and now supports read-only local MCP configuration discovery. Live MCP handshakes/tool inspection and real execution-evidence ingestion remain planned.
