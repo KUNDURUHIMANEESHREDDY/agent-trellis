@@ -81,7 +81,8 @@ function sanitizeEndpoint(value: unknown): string | undefined {
 
 function transportFor(config: JsonRecord): MCPTransport {
   const type = typeof config.type === "string" ? config.type.toLowerCase() : "";
-  if (type === "stdio" || type === "http" || type === "sse") return type;
+  if (type === "stdio" || type === "sse") return type;
+  if (type === "http" || type === "streamable-http" || type === "streamablehttp") return "http";
   if (typeof config.command === "string" && config.command.length > 0) return "stdio";
   if (typeof config.url === "string" && config.url.length > 0) return "http";
   return "unknown";
@@ -298,4 +299,64 @@ export function discoverMcpConfigurations(options: MCPDiscoveryOptions = {}): MC
     servers,
     diagnostics
   };
+}
+
+
+export interface ResolvedMcpServerConfig {
+  server: DiscoveredMcpServer;
+  config: JsonRecord;
+}
+
+function readRawConfig(configPath: string): JsonRecord | null {
+  try {
+    const stat = fs.statSync(configPath);
+    if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) return null;
+    const parsed: unknown = JSON.parse(fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/** Re-resolve a server from its current config; runtime secrets never enter the graph. */
+export function resolveMcpServerConfig(
+  discoveredId: string,
+  options: MCPDiscoveryOptions = {}
+): ResolvedMcpServerConfig | null {
+  const discovered = discoverMcpConfigurations(options).servers.find((server) => server.id === discoveredId);
+  if (!discovered) return null;
+
+  const root = readRawConfig(discovered.configPath);
+  if (!root) return null;
+
+  if (discovered.source === "claude-code-local") {
+    const projects = asRecord(root.projects);
+    if (!projects) return null;
+    for (const [projectPath, rawProject] of Object.entries(projects)) {
+      const project = asRecord(rawProject);
+      const definitions = asRecord(project?.mcpServers);
+      const config = asRecord(definitions?.[discovered.name]);
+      if (!config) continue;
+      const expectedId = stableId("mcp-discovered", [
+        "claude-code-local",
+        path.resolve(projectPath),
+        "local",
+        discovered.name
+      ]);
+      if (expectedId === discovered.id) return { server: discovered, config };
+    }
+    return null;
+  }
+
+  const definitions = asRecord(root.mcpServers);
+  const config = asRecord(definitions?.[discovered.name]);
+  if (!config) return null;
+  const scope = discovered.source === "claude-code-user" ? "user" : "configured";
+  const expectedId = stableId("mcp-discovered", [
+    discovered.source,
+    discovered.configPath,
+    scope,
+    discovered.name
+  ]);
+  return expectedId === discovered.id ? { server: discovered, config } : null;
 }

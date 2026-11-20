@@ -3,7 +3,8 @@ import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
 import { AgentGraph } from "./graph";
-import { discoverMcpConfigurations } from "./discovery";
+import { discoverMcpConfigurations, resolveMcpServerConfig } from "./discovery";
+import { inspectMcpServer } from "./mcp-inspector";
 
 export function createApp(graph: AgentGraph) {
   const app = express();
@@ -27,6 +28,48 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/agents", (_req, res) => res.json(graph.getAgents()));
   app.get("/api/evidence", (_req, res) => res.json(graph.getEvidence()));
   app.get("/api/discovery/mcp", (_req, res) => res.json(graph.getDiscoveredMcpServers()));
+  app.get("/api/inspection/mcp", (_req, res) => res.json(graph.getMcpInspections()));
+
+  const activeInspections = new Set<string>();
+  app.post("/api/inspection/mcp/:serverId", async (req, res) => {
+    const serverId = req.params.serverId;
+    const server = graph.getDiscoveredMcpServers().find((item) => item.id === serverId);
+    if (!server) return res.status(404).json({ error: "Discovered MCP server not found. Run discovery again." });
+    if (server.transport === "stdio" && req.body?.approveStdio !== true) {
+      return res.status(428).json({ error: "Local stdio process execution requires explicit approval." });
+    }
+    if (activeInspections.has(serverId)) {
+      return res.status(409).json({ error: "An inspection for this MCP server is already running." });
+    }
+
+    const configuredRoots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
+      .split(path.delimiter)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const target = resolveMcpServerConfig(serverId, {
+      workspaceRoots: [process.cwd(), ...configuredRoots]
+    });
+    if (!target) {
+      return res.status(409).json({ error: "The MCP configuration changed after discovery. Run discovery again." });
+    }
+
+    activeInspections.add(serverId);
+    try {
+      const outcome = await inspectMcpServer(target);
+      const recorded = graph.recordMcpInspection(outcome);
+      if (!recorded) return res.status(404).json({ error: "MCP server disappeared during inspection." });
+      return res.json({
+        ...recorded,
+        protocolEra: outcome.protocolEra,
+        protocolVersion: outcome.protocolVersion,
+        serverInfo: outcome.serverInfo,
+        declaredCapabilities: outcome.declaredCapabilities,
+        observedCapabilities: outcome.observedCapabilities
+      });
+    } finally {
+      activeInspections.delete(serverId);
+    }
+  });
   app.post("/api/discovery/mcp", (_req, res) => {
     const configuredRoots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
       .split(path.delimiter)

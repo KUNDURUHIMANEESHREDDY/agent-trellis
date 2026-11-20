@@ -1,7 +1,9 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { Database, type Connection } from "@relate/relate";
 import type { MCPDiscoveryResult } from "./discovery";
+import type { MCPInspectionOutcome } from "./mcp-inspector";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
 export type GraphEdge = { source: string; target: string; type: string; properties: Record<string, unknown> };
@@ -219,6 +221,162 @@ export class AgentGraph {
       hostName: row.host.name,
       hostSource: row.host.source
     }));
+  }
+
+  recordMcpInspection(outcome: MCPInspectionOutcome) {
+    const server = this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) RETURN properties(s) AS server",
+      { id: outcome.serverId }
+    ).rows[0] as { server: Record<string, unknown> } | undefined;
+    if (!server) return null;
+
+    const mismatches = outcome.capabilityComparisons.filter(
+      (item) => item.status === "missing" || item.status === "unexpected"
+    );
+    const result = outcome.success && mismatches.length === 0 ? "PASS" : "FAIL";
+    const severity = result === "PASS" ? "INFO" : "HIGH";
+    const inspectedAt = outcome.inspectedAt;
+    const evidenceId = "evidence-mcp-" + createHash("sha256")
+      .update(outcome.serverId + "\0" + inspectedAt)
+      .digest("hex").slice(0, 20);
+
+    this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) SET s += $props",
+      {
+        id: outcome.serverId,
+        props: {
+          connectionStatus: outcome.success ? "INSPECTED" : "FAILED",
+          lastInspectedAt: inspectedAt,
+          lastInspectionResult: result,
+          protocolEra: outcome.protocolEra ?? "unknown",
+          protocolVersion: outcome.protocolVersion ?? "unknown",
+          serverInfoName: outcome.serverInfo?.name ?? "",
+          serverInfoVersion: outcome.serverInfo?.version ?? "",
+          observedToolCount: outcome.tools.length,
+          declaredCapabilities: outcome.declaredCapabilities,
+          observedCapabilities: outcome.observedCapabilities
+        }
+      }
+    );
+
+    const existingTools = this.query(
+      "MATCH (t:Tool {mcpDiscovered: true, mcpServerId: $serverId}) RETURN t.id AS id",
+      { serverId: outcome.serverId }
+    ).rows as Array<{ id: string }>;
+    const retainedToolIds = new Set<string>();
+
+    for (const tool of outcome.tools) {
+      const toolId = "mcp-tool-" + createHash("sha256")
+        .update(outcome.serverId + "\0" + tool.name)
+        .digest("hex").slice(0, 20);
+      retainedToolIds.add(toolId);
+      const props = {
+        id: toolId,
+        name: tool.name,
+        description: tool.description ?? "",
+        mcpDiscovered: true,
+        mcpServerId: outcome.serverId,
+        inputSchemaJson: JSON.stringify(tool.inputSchema),
+        outputSchemaJson: tool.outputSchema === undefined ? "" : JSON.stringify(tool.outputSchema),
+        annotationsJson: tool.annotations === undefined ? "" : JSON.stringify(tool.annotations),
+        schemaInspectedAt: inspectedAt
+      };
+      this.query("MERGE (t:Tool {id: $id}) SET t += $props", { id: toolId, props });
+      this.query(
+        "MATCH (s:MCPServer {id: $serverId}), (t:Tool {id: $toolId}) MERGE (s)-[:EXPOSES]->(t)",
+        { serverId: outcome.serverId, toolId }
+      );
+    }
+
+    for (const tool of existingTools) {
+      if (!retainedToolIds.has(tool.id)) {
+        this.query("MATCH (t:Tool {id: $id}) DETACH DELETE t", { id: tool.id });
+      }
+    }
+
+    const evidenceProps = {
+      id: evidenceId,
+      kind: "MCP_LIVE_INSPECTION",
+      title: "MCP inspection: " + outcome.serverName,
+      result,
+      severity,
+      source: "MCP protocol inspection",
+      age: "just now",
+      inspectedAt,
+      serverId: outcome.serverId,
+      serverName: outcome.serverName,
+      transport: outcome.transport,
+      protocolEra: outcome.protocolEra ?? "unknown",
+      protocolVersion: outcome.protocolVersion ?? "unknown",
+      serverInfoJson: JSON.stringify(outcome.serverInfo ?? {}),
+      instructions: outcome.instructions ?? "",
+      declaredCapabilitiesJson: JSON.stringify(outcome.declaredCapabilities),
+      observedCapabilitiesJson: JSON.stringify(outcome.observedCapabilities),
+      capabilityComparisonsJson: JSON.stringify(outcome.capabilityComparisons),
+      toolsCount: outcome.tools.length,
+      errorSummary: outcome.errorSummary ?? ""
+    };
+    this.query("MERGE (e:Evidence {id: $id}) SET e += $props", { id: evidenceId, props: evidenceProps });
+    this.query(
+      "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:INSPECTED]->(s)",
+      { evidenceId, serverId: outcome.serverId }
+    );
+    this.checkpoint();
+
+    return {
+      id: evidenceId,
+      serverId: outcome.serverId,
+      result,
+      severity,
+      inspectedAt,
+      toolsCount: outcome.tools.length,
+      capabilityComparisons: outcome.capabilityComparisons,
+      errorSummary: outcome.errorSummary
+    };
+  }
+
+  getMcpInspections() {
+    const rows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_LIVE_INSPECTION'})-[:INSPECTED]->(s:MCPServer {discovered: true}) RETURN properties(e) AS evidence ORDER BY e.inspectedAt DESC"
+    ).rows as Array<{ evidence: Record<string, unknown> }>;
+    const toolRows = this.query(
+      "MATCH (t:Tool {mcpDiscovered: true}) RETURN properties(t) AS tool ORDER BY t.name"
+    ).rows as Array<{ tool: Record<string, unknown> }>;
+    const toolsByServer = new Map<string, Record<string, unknown>[]>();
+    for (const row of toolRows) {
+      const serverId = String(row.tool.mcpServerId ?? "");
+      const values = toolsByServer.get(serverId) ?? [];
+      values.push(row.tool);
+      toolsByServer.set(serverId, values);
+    }
+
+    const seen = new Set<string>();
+    const results: Array<Record<string, unknown>> = [];
+    for (const row of rows) {
+      const evidence = row.evidence;
+      const serverId = String(evidence.serverId ?? "");
+      if (seen.has(serverId)) continue;
+      seen.add(serverId);
+      results.push({
+        id: evidence.id,
+        serverId,
+        serverName: evidence.serverName,
+        result: evidence.result,
+        severity: evidence.severity,
+        inspectedAt: evidence.inspectedAt,
+        transport: evidence.transport,
+        protocolEra: evidence.protocolEra,
+        protocolVersion: evidence.protocolVersion,
+        serverInfoJson: evidence.serverInfoJson,
+        instructions: evidence.instructions,
+        declaredCapabilitiesJson: evidence.declaredCapabilitiesJson,
+        observedCapabilitiesJson: evidence.observedCapabilitiesJson,
+        capabilityComparisonsJson: evidence.capabilityComparisonsJson,
+        errorSummary: evidence.errorSummary,
+        tools: toolsByServer.get(serverId) ?? []
+      });
+    }
+    return results;
   }
 
   reset() { return this.seed(); }
