@@ -149,7 +149,7 @@ export class AgentGraph {
     ).rows as Array<{ capability: Record<string, unknown>; confidence?: number; source?: string }>;
     const servers = [...new Map(affected.map((row) => [String(row.server.id), row.server])).values()];
     const riskScore = Number(tool.tool.riskScore ?? 0);
-    const capabilities = inferred.map((row) => ({
+    const capabilities: Array<Record<string, unknown>> = inferred.map((row) => ({
       ...row.capability,
       confidence: row.confidence ?? null,
       inferred: row.source === "schema-inference"
