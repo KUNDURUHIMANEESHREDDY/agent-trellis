@@ -1,5 +1,6 @@
 export type CapabilitySensitivity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type PermissionMode = "READ" | "WRITE" | "EXECUTE" | "DESTRUCTIVE" | "MIXED" | "UNKNOWN";
+export type CapabilityRiskLevel = CapabilitySensitivity | "UNKNOWN";
 
 export interface CapabilityDefinition {
   key: string;
@@ -35,7 +36,7 @@ export interface ToolCapabilityAnalysis {
   destructiveHint: boolean | null;
   comparisons: DeclaredObservedComparison[];
   riskScore: number;
-  riskLevel: CapabilitySensitivity;
+  riskLevel: CapabilityRiskLevel;
   summary: string;
 }
 export const INFERENCE_VERSION = "1.0.0";
@@ -177,9 +178,12 @@ export function inferToolCapabilities(input: {
       explanation: destructiveHint === null ? "The server did not declare destructiveHint." : !destructiveHint && destructiveObserved ? "Non-destructive annotation conflicts with destructive operation signals." : "No conflicting destructive operation signal was inferred."
     }
   ];
-  const baseScore = capabilities.reduce((max, item) => Math.max(max, scoreFor(item.sensitivity)), capabilities.length ? 0 : 30);
+  const baseScore = capabilities.reduce((max, item) => Math.max(max, scoreFor(item.sensitivity)), 0);
   const mismatchCount = comparisons.filter((item) => item.status === "mismatch").length;
-  const riskScore = Math.min(100, baseScore + (destructiveObserved ? 8 : 0) + (openWorldObserved ? 5 : 0) + mismatchCount * 10);
+  const riskScore = capabilities.length === 0 && !destructiveObserved
+    ? 0
+    : Math.min(100, Math.max(baseScore, destructiveObserved ? 90 : 0) + (destructiveObserved ? 8 : 0) + (openWorldObserved ? 5 : 0) + mismatchCount * 10);
+  const riskLevel: CapabilityRiskLevel = capabilities.length === 0 && !destructiveObserved ? "UNKNOWN" : levelFor(riskScore);
   return {
     inferenceVersion: INFERENCE_VERSION,
     capabilities,
@@ -190,13 +194,14 @@ export function inferToolCapabilities(input: {
     destructiveHint,
     comparisons,
     riskScore,
-    riskLevel: levelFor(riskScore),
+    riskLevel,
     summary: capabilities.length ? capabilities.map((item) => item.name).join(", ") : "No capability matched current deterministic rules; manual review required."
   };
 }
 
-export function aggregateExposure(scores: number[]): { score: number; level: CapabilitySensitivity } {
-  if (scores.length === 0) return { score: 0, level: "LOW" };
-  const score = Math.min(100, Math.max(...scores) + Math.min(15, Math.max(0, scores.length - 1) * 3));
+export function aggregateExposure(scores: number[]): { score: number; level: CapabilityRiskLevel } {
+  const knownScores = scores.filter((score) => Number.isFinite(score) && score >= 0);
+  if (knownScores.length === 0) return { score: 0, level: "UNKNOWN" };
+  const score = Math.min(100, Math.max(...knownScores) + Math.min(15, Math.max(0, knownScores.length - 1) * 3));
   return { score, level: levelFor(score) };
 }

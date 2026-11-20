@@ -68,7 +68,7 @@ describe("MCP tool capability inference", () => {
       inputSchema: { type: "object", properties: { value: { type: "string" } } }
     });
     expect(result.capabilities).toHaveLength(0);
-    expect(result.riskLevel).toBe("LOW");
+    expect(result.riskLevel).toBe("UNKNOWN");
     expect(result.permissionMode).toBe("UNKNOWN");
   });
 });

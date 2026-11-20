@@ -557,7 +557,7 @@ export class AgentGraph {
         }
       );
       const scores = exposureByServer.get(toolServerId) ?? [];
-      scores.push(analysis.riskScore);
+      scores.push(analysis.riskLevel === "UNKNOWN" ? -1 : analysis.riskScore);
       exposureByServer.set(toolServerId, scores);
       analyses.push({
         toolId,
@@ -618,7 +618,7 @@ export class AgentGraph {
         "MATCH (a:Agent {id: $id})-[:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer {discovered: true}) RETURN properties(s) AS server",
         { id: agent.id }
       ).rows as Array<{ server: Record<string, unknown> }>;
-      const exposure = aggregateExposure(links.map((item) => Number(item.server.exposureScore ?? 0)));
+      const exposure = aggregateExposure(links.map((item) => Number(item.server.exposureScore ?? -1)));
       const toolCount = links.reduce((sum, item) => sum + Number(item.server.analyzedToolCount ?? 0), 0);
       const capabilities = [...new Set(links.flatMap((item) =>
         Array.isArray(item.server.observedCapabilityKeys) ? item.server.observedCapabilityKeys.map(String) : []
