@@ -65,6 +65,7 @@ export function createApp(graph: AgentGraph) {
       return argument
         .replace(/(https?:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@")
         .replace(sensitiveUrlPart, "$1[REDACTED]")
+        .replace(/(?:authorization|bearer)\s*[:=]?\s+[^\s,;]+/gi, "[REDACTED AUTHORIZATION]")
         .slice(0, 500);
     });
 

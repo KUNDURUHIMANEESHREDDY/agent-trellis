@@ -124,7 +124,7 @@ function buildTransport(target: MCPInspectionTarget) {
   const { server, config } = target;
 
   if (server.transport === "stdio") {
-    const command = requiredString(config.command, "stdio command");
+    const command = expandEnvironment(requiredString(config.command, "stdio command"));
     const args = config.args ?? [];
     if (!Array.isArray(args) || args.some((item) => typeof item !== "string")) {
       throw new Error("Invalid MCP configuration: stdio args must be strings.");
@@ -134,10 +134,10 @@ function buildTransport(target: MCPInspectionTarget) {
       : undefined;
     return new StdioClientTransport({
       command,
-      args: args as string[],
+      args: (args as string[]).map(expandEnvironment),
       env: { ...inheritedEnvironment(), ...stringMap(config.env, "stdio environment") },
       stderr: "ignore",
-      ...(cwd ? { cwd } : {})
+      cwd: cwd ?? path.dirname(server.configPath)
     });
   }
 

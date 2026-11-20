@@ -2,7 +2,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { Database, type Connection } from "@relate/relate";
-import type { MCPDiscoveryResult } from "./discovery";
+import type { DiscoveredMcpServer, MCPDiscoveryResult } from "./discovery";
 import type { MCPInspectionOutcome } from "./mcp-inspector";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
@@ -212,15 +212,15 @@ export class AgentGraph {
     this.checkpoint();
   }
 
-  getDiscoveredMcpServers(): Array<Record<string, unknown>> {
+  getDiscoveredMcpServers(): DiscoveredMcpServer[] {
     const rows = this.query(
       "MATCH (h:MCPHost)-[:CONFIGURES]->(s:MCPServer {discovered: true}) RETURN properties(h) AS host, properties(s) AS server ORDER BY h.name, s.name"
     ).rows as Array<{ host: Record<string, unknown>; server: Record<string, unknown> }>;
     return rows.map((row) => ({
       ...row.server,
-      hostName: row.host.name,
-      hostSource: row.host.source
-    }));
+      hostName: String(row.host.name ?? ""),
+      hostSource: String(row.host.source ?? "")
+    })) as DiscoveredMcpServer[];
   }
 
   recordMcpInspection(outcome: MCPInspectionOutcome) {
