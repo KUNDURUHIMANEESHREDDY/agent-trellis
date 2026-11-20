@@ -69,6 +69,7 @@ describe("discoverMcpConfigurations", () => {
       "cursorTool",
       "cursorWorkspaceTool",
       "projectTool",
+      "projectTool",
       "remoteDocs",
       "userTool",
       "windsurfTool",
