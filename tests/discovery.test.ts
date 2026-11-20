@@ -14,6 +14,7 @@ describe("discoverMcpConfigurations", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trellis-discovery-"));
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
+    const workspaceTwo = path.join(root, "workspace-two");
     const xdg = path.join(homeDir, ".config");
     const copilotHome = path.join(homeDir, ".copilot");
 
@@ -31,6 +32,9 @@ describe("discoverMcpConfigurations", () => {
       projects: {
         [path.resolve(workspace)]: {
           mcpServers: { projectTool: { command: "python", args: ["server.py"] } }
+        },
+        [path.resolve(workspaceTwo)]: {
+          mcpServers: { projectTool: { command: "python", args: ["other-server.py"] } }
         }
       }
     });
@@ -56,7 +60,7 @@ describe("discoverMcpConfigurations", () => {
       homeDir,
       platform: "linux",
       env: { XDG_CONFIG_HOME: xdg, COPILOT_HOME: copilotHome },
-      workspaceRoots: [workspace]
+      workspaceRoots: [workspace, workspaceTwo]
     });
 
     expect(result.scannedConfigPaths).toHaveLength(7);
@@ -73,6 +77,9 @@ describe("discoverMcpConfigurations", () => {
     expect(result.servers.find((server) => server.name === "remoteDocs")?.endpoint)
       .toBe("https://example.test/mcp");
     expect(result.servers.find((server) => server.name === "cursorTool")?.argumentCount).toBe(2);
+    const projectServers = result.servers.filter((server) => server.name === "projectTool");
+    expect(projectServers).toHaveLength(2);
+    expect(new Set(projectServers.map((server) => server.id)).size).toBe(2);
 
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("password");

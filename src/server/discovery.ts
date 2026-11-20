@@ -48,6 +48,7 @@ interface ConfigCandidate {
   hostName: string;
   configPath: string;
   kind?: "claude-code";
+  identity?: string;
 }
 
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -111,8 +112,9 @@ function addServerDefinitions(
       continue;
     }
 
-    const hostId = stableId("mcp-host", [candidate.source, candidate.configPath, scope]);
-    const id = stableId("mcp-discovered", [candidate.source, candidate.configPath, scope, name]);
+    const identity = candidate.identity ?? candidate.configPath;
+    const hostId = stableId("mcp-host", [candidate.source, identity, scope]);
+    const id = stableId("mcp-discovered", [candidate.source, identity, scope, name]);
     const environmentKeys = keysOf(config.env);
     const headerNames = keysOf(config.headers);
     const command = typeof config.command === "string" ? config.command : undefined;
@@ -280,7 +282,8 @@ export function discoverMcpConfigurations(options: MCPDiscoveryOptions = {}): MC
           addServerDefinitions(projectConfig.mcpServers, {
             ...candidate,
             source: "claude-code-local",
-            hostName: "Claude Code (local: " + path.basename(workspaceRoot) + ")"
+            hostName: "Claude Code (local: " + path.basename(workspaceRoot) + ")",
+            identity: workspaceRoot
           }, "local", servers, diagnostics);
         }
       }
