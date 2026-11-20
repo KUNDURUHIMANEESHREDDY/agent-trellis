@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { Database, type Connection } from "@relate/relate";
 import type { DiscoveredMcpServer, MCPDiscoveryResult } from "./discovery";
 import type { MCPInspectionOutcome } from "./mcp-inspector";
+import { aggregateExposure, inferToolCapabilities, INFERENCE_VERSION, type ToolCapabilityAnalysis } from "./capability-intelligence";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
 export type GraphEdge = { source: string; target: string; type: string; properties: Record<string, unknown> };
@@ -116,7 +117,9 @@ export class AgentGraph {
     const failed = this.query("MATCH (e:Evidence {result: 'FAIL'}) RETURN count(e) AS total").rows[0] as { total: number };
     const highRisk = this.query("MATCH (t:Tool) WHERE t.risk IN ['HIGH', 'CRITICAL'] RETURN count(t) AS total").rows[0] as { total: number };
     const discovered = this.query("MATCH (s:MCPServer {discovered: true}) RETURN count(s) AS total").rows[0] as { total?: number } | undefined;
-    return { agents: counts.Agent ?? 0, mcpServers: counts.MCPServer ?? 0, discoveredMcpServers: Number(discovered?.total ?? 0), tools: counts.Tool ?? 0, capabilities: counts.Capability ?? 0, policies: counts.Policy ?? 0, evidence: counts.Evidence ?? 0, failedFindings: Number(failed?.total ?? 0), highRiskTools: Number(highRisk?.total ?? 0) };
+    const analyzed = this.query("MATCH (t:Tool {mcpDiscovered: true, capabilityAnalysisVersion: $version}) RETURN count(t) AS total", { version: INFERENCE_VERSION }).rows[0] as { total?: number } | undefined;
+    const criticalMcp = this.query("MATCH (t:Tool {mcpDiscovered: true, riskLevel: 'CRITICAL'}) RETURN count(t) AS total").rows[0] as { total?: number } | undefined;
+    return { agents: counts.Agent ?? 0, mcpServers: counts.MCPServer ?? 0, discoveredMcpServers: Number(discovered?.total ?? 0), tools: counts.Tool ?? 0, capabilities: counts.Capability ?? 0, policies: counts.Policy ?? 0, evidence: counts.Evidence ?? 0, failedFindings: Number(failed?.total ?? 0), highRiskTools: Number(highRisk?.total ?? 0), analyzedMcpTools: Number(analyzed?.total ?? 0), criticalMcpTools: Number(criticalMcp?.total ?? 0) };
   }
 
   getGraph() {
@@ -138,7 +141,7 @@ export class AgentGraph {
   getImpact(toolId: string) {
     const tool = this.query("MATCH (t:Tool {id: $id}) RETURN properties(t) AS tool", { id: toolId }).rows[0] as { tool: Record<string, unknown> } | undefined;
     if (!tool) return null;
-    const affected = this.query("MATCH (a:Agent)-[:CONNECTS_TO]->(s:MCPServer)-[:EXPOSES]->(t:Tool {id: $id}) RETURN DISTINCT properties(a) AS agent, properties(s) AS server", { id: toolId }).rows as Array<{ agent: Record<string, unknown>; server: Record<string, unknown> }>;
+    const affected = this.query("MATCH (a:Agent)-[:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer)-[:EXPOSES]->(t:Tool {id: $id}) RETURN DISTINCT properties(a) AS agent, properties(s) AS server", { id: toolId }).rows as Array<{ agent: Record<string, unknown>; server: Record<string, unknown> }>;
     const chain = this.query("MATCH (t:Tool {id: $id})-[:REQUIRES]->(c:Capability)<-[:RESTRICTS]-(p:Policy) RETURN properties(c) AS capability, properties(p) AS policy", { id: toolId }).rows as Array<{ capability: Record<string, unknown>; policy: Record<string, unknown> }>;
     return { tool: tool.tool, affectedAgents: affected.map((row) => row.agent), servers: [...new Map(affected.map((row) => [String(row.server.id), row.server])).values()], controls: chain };
   }
