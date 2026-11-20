@@ -22,6 +22,7 @@ export interface DiscoveredMcpServer {
   environmentKeys: string[];
   headerNames: string[];
   credentialHints: boolean;
+  hostSource?: string;
 }
 
 export interface MCPDiscoveryDiagnostic {

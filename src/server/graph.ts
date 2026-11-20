@@ -216,11 +216,28 @@ export class AgentGraph {
     const rows = this.query(
       "MATCH (h:MCPHost)-[:CONFIGURES]->(s:MCPServer {discovered: true}) RETURN properties(h) AS host, properties(s) AS server ORDER BY h.name, s.name"
     ).rows as Array<{ host: Record<string, unknown>; server: Record<string, unknown> }>;
-    return rows.map((row) => ({
-      ...row.server,
-      hostName: String(row.host.name ?? ""),
-      hostSource: String(row.host.source ?? "")
-    })) as DiscoveredMcpServer[];
+    return rows.map((row) => {
+      const server = row.server;
+      return {
+        id: String(server.id ?? ""),
+        hostId: String(server.hostId ?? ""),
+        hostName: String(row.host.name ?? ""),
+        hostSource: String(row.host.source ?? ""),
+        source: String(server.source ?? ""),
+        configPath: String(server.configPath ?? ""),
+        configScope: String(server.configScope ?? ""),
+        name: String(server.name ?? ""),
+        transport: server.transport === "stdio" || server.transport === "http" || server.transport === "sse"
+          ? server.transport
+          : "unknown",
+        ...(typeof server.command === "string" ? { command: server.command } : {}),
+        ...(typeof server.endpoint === "string" ? { endpoint: server.endpoint } : {}),
+        argumentCount: Number(server.argumentCount ?? 0),
+        environmentKeys: Array.isArray(server.environmentKeys) ? server.environmentKeys.map(String) : [],
+        headerNames: Array.isArray(server.headerNames) ? server.headerNames.map(String) : [],
+        credentialHints: Boolean(server.credentialHints)
+      };
+    });
   }
 
   recordMcpInspection(outcome: MCPInspectionOutcome) {
