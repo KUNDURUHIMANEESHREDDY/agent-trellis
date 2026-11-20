@@ -18,6 +18,8 @@ describe("MCP tool capability inference", () => {
     expect(finding?.confidence).toBeGreaterThan(0.7);
     expect(finding?.evidence.map((item) => item.source)).toContain("input_schema");
     expect(result.permissionMode).toBe("READ");
+    expect(finding?.key).toBe("filesystem_read");
+    expect(result.capabilities.map((item) => item.key)).not.toContain("email_send");
   });
 
   it("identifies destructive database operations and annotation mismatches", () => {
