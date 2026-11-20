@@ -48,7 +48,8 @@ export function createApp(graph: AgentGraph) {
       return res.status(409).json({ error: "Configured stdio arguments are invalid." });
     }
 
-    const sensitiveFlag = /(?:^|[-_])(token|secret|password|api[-_]?key|authorization|credential)(?:$|=)/i;
+    const sensitiveOption = /^--?(?:token|secret|password|api[-_]?key|authorization|credential)$/i;
+    const sensitiveAssignment = /^((?:--?)?(?:token|secret|password|api[-_]?key|authorization|credential))=/i;
     const sensitiveUrlPart = /([?&](?:access_token|api[-_]?key|token|secret|password)=)[^&#\s]+/gi;
     let redactNext = false;
     const args = (rawArgs as string[]).map((argument) => {
@@ -56,9 +57,9 @@ export function createApp(graph: AgentGraph) {
         redactNext = false;
         return "[REDACTED]";
       }
-      const equalIndex = argument.indexOf("=");
-      if (sensitiveFlag.test(argument)) {
-        if (equalIndex >= 0) return argument.slice(0, equalIndex + 1) + "[REDACTED]";
+      const assignment = sensitiveAssignment.exec(argument);
+      if (assignment) return assignment[1] + "=[REDACTED]";
+      if (sensitiveOption.test(argument)) {
         redactNext = true;
         return argument.slice(0, 500);
       }
