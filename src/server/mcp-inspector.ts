@@ -49,8 +49,9 @@ export interface MCPInspectionTarget {
 
 const CONNECT_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
-const MAX_TOOLS = 500;
-const MAX_SCHEMA_BYTES = 128 * 1024;
+const MAX_TOOLS = 200;
+const MAX_SCHEMA_BYTES = 64 * 1024;
+const MAX_TOTAL_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_DESCRIPTION_LENGTH = 4_000;
 
 function asRecord(value: unknown): JsonRecord {
@@ -268,13 +269,29 @@ export async function inspectMcpServer(target: MCPInspectionTarget): Promise<MCP
         }
         toolsObserved = true;
         observed.add("tools");
-        outcome.tools = result.tools.map((tool) => ({
-          name: requiredString(tool.name, "tool name"),
-          ...(shortText(tool.description) ? { description: shortText(tool.description) } : {}),
-          inputSchema: boundedJson(tool.inputSchema),
-          ...(tool.outputSchema ? { outputSchema: boundedJson(tool.outputSchema) } : {}),
-          ...(tool.annotations ? { annotations: boundedJson(tool.annotations) } : {})
-        }));
+        let remainingSchemaBytes = MAX_TOTAL_SCHEMA_BYTES;
+        outcome.tools = result.tools.map((tool) => {
+          const inputSchema = boundedJson(tool.inputSchema);
+          const outputSchema = tool.outputSchema ? boundedJson(tool.outputSchema) : undefined;
+          const annotations = tool.annotations ? boundedJson(tool.annotations) : undefined;
+          const schemaBytes = byteLength(inputSchema) + byteLength(outputSchema) + byteLength(annotations);
+          if (schemaBytes > remainingSchemaBytes) {
+            remainingSchemaBytes = 0;
+            return {
+              name: requiredString(tool.name, "tool name"),
+              ...(shortText(tool.description) ? { description: shortText(tool.description) } : {}),
+              inputSchema: { $truncated: true, reason: "inspection-wide schema size limit reached" }
+            };
+          }
+          remainingSchemaBytes -= schemaBytes;
+          return {
+            name: requiredString(tool.name, "tool name"),
+            ...(shortText(tool.description) ? { description: shortText(tool.description) } : {}),
+            inputSchema,
+            ...(outputSchema !== undefined ? { outputSchema } : {}),
+            ...(annotations !== undefined ? { annotations } : {})
+          };
+        });
       } catch (error) {
         if (methodNotAvailable(error)) toolsObserved = false;
         else throw error;

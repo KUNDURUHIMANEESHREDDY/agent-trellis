@@ -29,3 +29,15 @@
 @media(max-width:1150px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:900px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){.discovery-panel-head{align-items:flex-start;flex-direction:column}.discovery-main{flex-direction:column}.discovery-status{white-space:normal}}
+
+.discovery-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}
+.discovery-actions .button{flex-shrink:0}
+.inspection-summary{margin-top:12px;padding:11px;border:1px solid #2b3d57;background:#0d1828;border-radius:7px}
+.inspection-meta{display:flex;flex-wrap:wrap;gap:7px 14px;color:#90a3bc;font-size:8px;overflow-wrap:anywhere}
+.inspection-error{margin-top:9px;color:#ff9ba2;font-size:9px}
+.inspection-pass{color:#83dfbf;border-color:#285544;background:#123027}
+.inspection-fail{color:#ff9ba2;border-color:#67313c;background:#3a2029}
+.inspection-details{margin-top:9px;color:#aebdd2;font-size:9px}
+.inspection-details summary{cursor:pointer;padding:6px 0}
+.inspection-details pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;color:#9eb1cc;background:#091320;border:1px solid #1b2b41;border-radius:5px;padding:9px;font-size:8px}
+@media(max-width:620px){.discovery-actions{align-items:flex-start;flex-direction:column}.discovery-actions .button{width:100%;justify-content:center}}

@@ -212,7 +212,7 @@ export class AgentGraph {
     this.checkpoint();
   }
 
-  getDiscoveredMcpServers() {
+  getDiscoveredMcpServers(): Array<Record<string, unknown>> {
     const rows = this.query(
       "MATCH (h:MCPHost)-[:CONFIGURES]->(s:MCPServer {discovered: true}) RETURN properties(h) AS host, properties(s) AS server ORDER BY h.name, s.name"
     ).rows as Array<{ host: Record<string, unknown>; server: Record<string, unknown> }>;
