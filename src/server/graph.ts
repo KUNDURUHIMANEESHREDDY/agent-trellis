@@ -402,5 +402,300 @@ export class AgentGraph {
     return results;
   }
 
+  private parseStoredJson(value: unknown): unknown {
+    if (typeof value !== "string" || value.length === 0) return {};
+    try { return JSON.parse(value) as unknown; } catch { return {}; }
+  }
+
+  analyzeMcpCapabilities(serverId?: string) {
+    const rows = this.query(
+      "MATCH (t:Tool {mcpDiscovered: true}) WHERE ($serverId IS NULL OR t.mcpServerId = $serverId) RETURN properties(t) AS tool ORDER BY t.mcpServerId, t.name",
+      { serverId: serverId ?? null }
+    ).rows as Array<{ tool: Record<string, unknown> }>;
+    const analyzedAt = new Date().toISOString();
+    const analyses: Array<Record<string, unknown>> = [];
+    const exposureByServer = new Map<string, number[]>();
+
+    for (const row of rows) {
+      const tool = row.tool;
+      const toolId = String(tool.id ?? "");
+      const toolServerId = String(tool.mcpServerId ?? "");
+      const analysis: ToolCapabilityAnalysis = inferToolCapabilities({
+        name: String(tool.name ?? ""),
+        description: String(tool.description ?? ""),
+        inputSchema: this.parseStoredJson(tool.inputSchemaJson),
+        outputSchema: this.parseStoredJson(tool.outputSchemaJson),
+        annotations: this.parseStoredJson(tool.annotationsJson)
+      });
+
+      this.query(
+        "MATCH (t:Tool {id: $id})-[r:REQUIRES]->(:Capability) WHERE r.source = 'schema-inference' DELETE r",
+        { id: toolId }
+      );
+      for (const finding of analysis.capabilities) {
+        const properties = {
+          id: finding.graphId,
+          name: finding.name,
+          category: finding.category,
+          sensitivity: finding.sensitivity,
+          description: finding.description,
+          source: "schema-inference",
+          inferenceKey: finding.key,
+          inferenceVersion: INFERENCE_VERSION
+        };
+        this.query("MERGE (c:Capability {id: $id}) SET c += $props", {
+          id: finding.graphId,
+          props: properties
+        });
+        this.query(
+          "MATCH (t:Tool {id: $toolId}), (c:Capability {id: $capabilityId}) MERGE (t)-[r:REQUIRES {source: 'schema-inference'}]->(c) SET r.confidence = $confidence, r.evidenceJson = $evidenceJson",
+          {
+            toolId,
+            capabilityId: finding.graphId,
+            confidence: finding.confidence,
+            evidenceJson: JSON.stringify(finding.evidence)
+          }
+        );
+      }
+
+      const fingerprint = createHash("sha256")
+        .update([
+          String(tool.inputSchemaJson ?? ""),
+          String(tool.outputSchemaJson ?? ""),
+          String(tool.annotationsJson ?? ""),
+          analysis.inferenceVersion
+        ].join("\0"))
+        .digest("hex");
+      const evidenceId = "evidence-capability-" + createHash("sha256")
+        .update(toolId + "\0" + fingerprint)
+        .digest("hex").slice(0, 20);
+      const mismatches = analysis.comparisons.filter((item) => item.status === "mismatch");
+      const evidenceProperties = {
+        id: evidenceId,
+        kind: "MCP_CAPABILITY_ANALYSIS",
+        title: "Capability analysis: " + String(tool.name ?? toolId),
+        result: mismatches.length > 0 ? "FAIL" : "OBSERVED",
+        severity: analysis.riskLevel,
+        source: "Deterministic tool-schema inference",
+        age: "just now",
+        analyzedAt,
+        toolId,
+        serverId: toolServerId,
+        inferenceVersion: analysis.inferenceVersion,
+        riskScore: analysis.riskScore,
+        riskLevel: analysis.riskLevel,
+        permissionMode: analysis.permissionMode,
+        capabilityFindingsJson: JSON.stringify(analysis.capabilities),
+        comparisonsJson: JSON.stringify(analysis.comparisons),
+        summary: analysis.summary
+      };
+      this.query("MERGE (e:Evidence {id: $id}) SET e += $props", {
+        id: evidenceId,
+        props: evidenceProperties
+      });
+      this.query(
+        "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:ANALYZES]->(t)",
+        { evidenceId, toolId }
+      );
+      for (const finding of analysis.capabilities) {
+        this.query(
+          "MATCH (e:Evidence {id: $evidenceId}), (c:Capability {id: $capabilityId}) MERGE (e)-[:IDENTIFIES]->(c)",
+          { evidenceId, capabilityId: finding.graphId }
+        );
+      }
+
+      this.query(
+        "MATCH (t:Tool {id: $id}) SET t += $props",
+        {
+          id: toolId,
+          props: {
+            capabilityAnalysisVersion: INFERENCE_VERSION,
+            capabilityAnalyzedAt: analyzedAt,
+            inferredCapabilitiesJson: JSON.stringify(analysis.capabilities),
+            capabilityComparisonsJson: JSON.stringify(analysis.comparisons),
+            permissionMode: analysis.permissionMode,
+            destructiveObserved: analysis.destructiveObserved,
+            openWorldObserved: analysis.openWorldObserved,
+            riskScore: analysis.riskScore,
+            riskLevel: analysis.riskLevel,
+            analysisSummary: analysis.summary,
+            readOnlyHint: analysis.readOnlyHint,
+            destructiveHint: analysis.destructiveHint,
+            capabilityCount: analysis.capabilities.length
+          }
+        }
+      );
+      const scores = exposureByServer.get(toolServerId) ?? [];
+      scores.push(analysis.riskScore);
+      exposureByServer.set(toolServerId, scores);
+      analyses.push({
+        toolId,
+        serverId: toolServerId,
+        toolName: tool.name,
+        riskScore: analysis.riskScore,
+        riskLevel: analysis.riskLevel,
+        permissionMode: analysis.permissionMode,
+        capabilityCount: analysis.capabilities.length,
+        capabilities: analysis.capabilities,
+        comparisons: analysis.comparisons,
+        evidenceId
+      });
+    }
+
+    for (const [id, scores] of exposureByServer) {
+      const exposure = aggregateExposure(scores);
+      const capabilityRows = this.query(
+        "MATCH (s:MCPServer {id: $id})-[:EXPOSES]->(t:Tool {mcpDiscovered: true})-[r:REQUIRES {source: 'schema-inference'}]->(c:Capability) RETURN DISTINCT c.name AS name, c.inferenceKey AS key",
+        { id }
+      ).rows as Array<{ name: string; key: string }>;
+      const toolRows = this.query(
+        "MATCH (s:MCPServer {id: $id})-[:EXPOSES]->(t:Tool {mcpDiscovered: true}) RETURN count(t) AS total",
+        { id }
+      ).rows[0] as { total?: number };
+      const uniqueCapabilities = [...new Set(capabilityRows.map((item) => item.key || item.name))].sort();
+      this.query(
+        "MATCH (s:MCPServer {id: $id, discovered: true}) SET s += $props",
+        {
+          id,
+          props: {
+            exposureScore: exposure.score,
+            exposureLevel: exposure.level,
+            analyzedToolCount: Number(toolRows?.total ?? scores.length),
+            observedCapabilityKeys: uniqueCapabilities,
+            capabilityAnalysisVersion: INFERENCE_VERSION,
+            capabilityAnalyzedAt: analyzedAt
+          }
+        }
+      );
+    }
+
+    this.recalculateAgentExposure();
+    this.checkpoint();
+    return {
+      inferenceVersion: INFERENCE_VERSION,
+      analyzedAt,
+      analyzedTools: analyses.length,
+      findings: analyses,
+      summary: this.getCapabilityIntelligence().summary
+    };
+  }
+
+  private recalculateAgentExposure() {
+    const agents = this.query("MATCH (a:Agent) RETURN a.id AS id").rows as Array<{ id: string }>;
+    for (const agent of agents) {
+      const links = this.query(
+        "MATCH (a:Agent {id: $id})-[:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer {discovered: true}) RETURN properties(s) AS server",
+        { id: agent.id }
+      ).rows as Array<{ server: Record<string, unknown> }>;
+      const exposure = aggregateExposure(links.map((item) => Number(item.server.exposureScore ?? 0)));
+      const toolCount = links.reduce((sum, item) => sum + Number(item.server.analyzedToolCount ?? 0), 0);
+      const capabilities = [...new Set(links.flatMap((item) =>
+        Array.isArray(item.server.observedCapabilityKeys) ? item.server.observedCapabilityKeys.map(String) : []
+      ))].sort();
+      this.query(
+        "MATCH (a:Agent {id: $id}) SET a += $props",
+        {
+          id: agent.id,
+          props: {
+            mcpExposureScore: exposure.score,
+            mcpExposureLevel: exposure.level,
+            exposedMcpServerCount: links.length,
+            exposedMcpToolCount: toolCount,
+            observedMcpCapabilities: capabilities
+          }
+        }
+      );
+    }
+  }
+
+  associateAgentWithMcpServer(agentId: string, serverId: string) {
+    const agent = this.query("MATCH (a:Agent {id: $id}) RETURN a.id AS id", { id: agentId }).rows[0];
+    if (!agent) return { ok: false, status: 404 as const, error: "Agent not found." };
+    const server = this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) RETURN s.id AS id",
+      { id: serverId }
+    ).rows[0];
+    if (!server) return { ok: false, status: 404 as const, error: "Discovered MCP server not found." };
+    this.query(
+      "MATCH (a:Agent {id: $agentId}), (s:MCPServer {id: $serverId}) MERGE (a)-[:USER_ASSOCIATED_WITH]->(s)",
+      { agentId, serverId }
+    );
+    this.recalculateAgentExposure();
+    this.checkpoint();
+    return { ok: true as const, agentId, serverId };
+  }
+
+  removeAgentMcpAssociation(agentId: string, serverId: string) {
+    this.query(
+      "MATCH (a:Agent {id: $agentId})-[r:USER_ASSOCIATED_WITH]->(s:MCPServer {id: $serverId, discovered: true}) DELETE r",
+      { agentId, serverId }
+    );
+    this.recalculateAgentExposure();
+    this.checkpoint();
+    return { ok: true as const, agentId, serverId };
+  }
+
+  getCapabilityIntelligence() {
+    const servers = this.getDiscoveredMcpServers();
+    const serverResults: Array<Record<string, any>> = servers.map((server) => {
+      const toolRows = this.query(
+        "MATCH (s:MCPServer {id: $id})-[:EXPOSES]->(t:Tool {mcpDiscovered: true}) RETURN properties(t) AS tool ORDER BY t.name",
+        { id: server.id }
+      ).rows as Array<{ tool: Record<string, unknown> }>;
+      const agentRows = this.query(
+        "MATCH (a:Agent)-[r:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer {id: $id}) RETURN DISTINCT properties(a) AS agent, type(r) AS relation",
+        { id: server.id }
+      ).rows as Array<{ agent: Record<string, unknown>; relation: string }>;
+      const tools = toolRows.map((row) => {
+        const tool = row.tool;
+        return {
+          id: tool.id,
+          name: tool.name,
+          description: tool.description,
+          riskScore: Number(tool.riskScore ?? 0),
+          riskLevel: String(tool.riskLevel ?? "UNKNOWN"),
+          permissionMode: String(tool.permissionMode ?? "UNKNOWN"),
+          capabilityAnalysisVersion: tool.capabilityAnalysisVersion ?? null,
+          capabilities: this.parseStoredJson(tool.inferredCapabilitiesJson),
+          comparisons: this.parseStoredJson(tool.capabilityComparisonsJson),
+          analysisSummary: tool.analysisSummary ?? "Not analyzed"
+        };
+      });
+      return {
+        ...server,
+        exposureScore: Number(server.exposureScore ?? 0),
+        exposureLevel: String(server.exposureLevel ?? "UNKNOWN"),
+        tools,
+        agents: agentRows.map((row) => ({
+          id: row.agent.id,
+          name: row.agent.name,
+          risk: row.agent.risk,
+          exposureScore: Number(row.agent.mcpExposureScore ?? 0),
+          associationSource: row.relation === "USER_ASSOCIATED_WITH" ? "user-confirmed" : "existing graph relationship"
+        }))
+      };
+    });
+
+    const capabilityRows = this.query(
+      "MATCH (c:Capability) WHERE c.source = 'schema-inference' OR c.inferenceVersion = $version RETURN properties(c) AS capability ORDER BY c.sensitivity DESC, c.name",
+      { version: INFERENCE_VERSION }
+    ).rows as Array<{ capability: Record<string, unknown> }>;
+    const tools = serverResults.flatMap((server) => server.tools);
+    return {
+      summary: {
+        servers: serverResults.length,
+        analyzedServers: serverResults.filter((server) => server.tools.some((tool: any) => tool.capabilityAnalysisVersion === INFERENCE_VERSION)).length,
+        tools: tools.length,
+        analyzedTools: tools.filter((tool: any) => tool.capabilityAnalysisVersion === INFERENCE_VERSION).length,
+        highRiskTools: tools.filter((tool: any) => ["HIGH", "CRITICAL"].includes(tool.riskLevel)).length,
+        criticalTools: tools.filter((tool: any) => tool.riskLevel === "CRITICAL").length,
+        unassociatedServers: serverResults.filter((server) => server.agents.length === 0).length,
+        capabilities: capabilityRows.length
+      },
+      capabilities: capabilityRows.map((row) => row.capability),
+      servers: serverResults
+    };
+  }
+
   reset() { return this.seed(); }
 }
