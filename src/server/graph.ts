@@ -235,6 +235,8 @@ export class AgentGraph {
           : "unknown",
         ...(typeof server.command === "string" ? { command: server.command } : {}),
         ...(typeof server.endpoint === "string" ? { endpoint: server.endpoint } : {}),
+        ...(typeof server.exposureScore === "number" ? { exposureScore: server.exposureScore } : {}),
+        ...(typeof server.exposureLevel === "string" ? { exposureLevel: server.exposureLevel } : {}),
         argumentCount: Number(server.argumentCount ?? 0),
         environmentKeys: Array.isArray(server.environmentKeys) ? server.environmentKeys.map(String) : [],
         headerNames: Array.isArray(server.headerNames) ? server.headerNames.map(String) : [],

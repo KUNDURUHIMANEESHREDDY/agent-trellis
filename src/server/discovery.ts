@@ -23,6 +23,8 @@ export interface DiscoveredMcpServer {
   headerNames: string[];
   credentialHints: boolean;
   hostSource?: string;
+  exposureScore?: number;
+  exposureLevel?: string;
 }
 
 export interface MCPDiscoveryDiagnostic {
