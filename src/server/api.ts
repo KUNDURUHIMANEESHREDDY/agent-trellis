@@ -29,6 +29,22 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/evidence", (_req, res) => res.json(graph.getEvidence()));
   app.get("/api/discovery/mcp", (_req, res) => res.json(graph.getDiscoveredMcpServers()));
   app.get("/api/inspection/mcp", (_req, res) => res.json(graph.getMcpInspections()));
+  app.get("/api/capabilities/intelligence", (_req, res) => res.json(graph.getCapabilityIntelligence()));
+  app.post("/api/capabilities/analyze", (req, res) => {
+    const serverId = typeof req.body?.serverId === "string" ? req.body.serverId : undefined;
+    if (serverId && !graph.getDiscoveredMcpServers().some((server) => server.id === serverId)) {
+      return res.status(404).json({ error: "Discovered MCP server not found." });
+    }
+    return res.json(graph.analyzeMcpCapabilities(serverId));
+  });
+  app.post("/api/agents/:agentId/mcp-servers/:serverId", (req, res) => {
+    const result = graph.associateAgentWithMcpServer(req.params.agentId, req.params.serverId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(201).json(result);
+  });
+  app.delete("/api/agents/:agentId/mcp-servers/:serverId", (req, res) => {
+    return res.json(graph.removeAgentMcpAssociation(req.params.agentId, req.params.serverId));
+  });
 
   const activeInspections = new Set<string>();
   app.get("/api/inspection/mcp/:serverId/approval-preview", (req, res) => {
