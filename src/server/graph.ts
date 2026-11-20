@@ -288,9 +288,12 @@ export class AgentGraph {
       );
     }
 
-    for (const tool of existingTools) {
-      if (!retainedToolIds.has(tool.id)) {
-        this.query("MATCH (t:Tool {id: $id}) DETACH DELETE t", { id: tool.id });
+    const canReconcileTools = outcome.success && outcome.observedCapabilities.includes("tools");
+    if (canReconcileTools) {
+      for (const tool of existingTools) {
+        if (!retainedToolIds.has(tool.id)) {
+          this.query("MATCH (t:Tool {id: $id}) DETACH DELETE t", { id: tool.id });
+        }
       }
     }
 

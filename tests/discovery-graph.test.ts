@@ -49,4 +49,80 @@ describe("AgentGraph MCP discovery ingestion", () => {
     graph.checkpoint();
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("records inspection evidence and retains the last known tool snapshot after a failed reconnect", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trellis-inspection-"));
+    const graph = new AgentGraph(path.join(dir, "graph"));
+    await graph.initialize();
+    const configPath = path.join(dir, "mcp.json");
+    const server = {
+      id: "mcp-inspection-server",
+      hostId: "mcp-inspection-host",
+      hostName: "Test MCP",
+      source: "workspace-mcp",
+      configPath,
+      configScope: "configured",
+      name: "test-server",
+      transport: "http" as const,
+      endpoint: "https://example.test/mcp",
+      argumentCount: 0,
+      environmentKeys: [],
+      headerNames: [],
+      credentialHints: false
+    };
+    graph.syncMcpDiscovery({
+      scannedConfigPaths: [configPath],
+      servers: [server],
+      diagnostics: []
+    });
+
+    const inspectedAt = "2026-11-20T12:00:00.000Z";
+    const successful = {
+      serverId: server.id,
+      serverName: server.name,
+      inspectedAt,
+      success: true,
+      transport: "http",
+      protocolEra: "legacy" as const,
+      protocolVersion: "2025-11-25",
+      declaredCapabilities: ["tools"],
+      observedCapabilities: ["tools"],
+      capabilityComparisons: [
+        { capability: "tools" as const, declared: true, observed: true, status: "consistent" as const },
+        { capability: "resources" as const, declared: false, observed: null, status: "not_checked" as const },
+        { capability: "prompts" as const, declared: false, observed: null, status: "not_checked" as const }
+      ],
+      tools: [{ name: "read_status", inputSchema: { type: "object", properties: {} } }]
+    };
+    graph.recordMcpInspection(successful);
+    const toolId = graph.getGraph().nodes.find(
+      (node) => node.labels.includes("Tool") && node.properties.mcpServerId === server.id
+    )?.id;
+    expect(toolId).toBeTruthy();
+
+    const failed = {
+      ...successful,
+      inspectedAt: "2026-11-20T12:01:00.000Z",
+      success: false,
+      protocolEra: undefined,
+      protocolVersion: undefined,
+      declaredCapabilities: [],
+      observedCapabilities: [],
+      capabilityComparisons: [],
+      tools: [],
+      errorSummary: "ConnectionError"
+    };
+    const evidence = graph.recordMcpInspection(failed);
+    expect(evidence?.result).toBe("FAIL");
+
+    const afterFailure = graph.getGraph();
+    expect(afterFailure.nodes.some((node) => node.id === toolId)).toBe(true);
+    expect(graph.getMcpInspections()).toHaveLength(1);
+    expect(graph.getMcpInspections()[0].errorSummary).toBe("ConnectionError");
+    expect(graph.getOverview().evidence).toBe(6);
+
+    graph.checkpoint();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
 });

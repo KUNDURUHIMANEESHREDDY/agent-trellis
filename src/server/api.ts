@@ -31,6 +31,59 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/inspection/mcp", (_req, res) => res.json(graph.getMcpInspections()));
 
   const activeInspections = new Set<string>();
+  app.get("/api/inspection/mcp/:serverId/approval-preview", (req, res) => {
+    const server = graph.getDiscoveredMcpServers().find((item) => item.id === req.params.serverId);
+    if (!server) return res.status(404).json({ error: "Discovered MCP server not found." });
+    if (server.transport !== "stdio") return res.status(400).json({ error: "Only stdio servers require a process preview." });
+
+    const roots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
+      .split(path.delimiter).map((item) => item.trim()).filter(Boolean);
+    const target = resolveMcpServerConfig(server.id, { workspaceRoots: [process.cwd(), ...roots] });
+    if (!target) return res.status(409).json({ error: "Configuration changed after discovery. Run discovery again." });
+
+    const command = typeof target.config.command === "string" ? target.config.command : "";
+    if (!command) return res.status(409).json({ error: "Configured stdio command is missing." });
+    const rawArgs = target.config.args ?? [];
+    if (!Array.isArray(rawArgs) || rawArgs.some((item) => typeof item !== "string")) {
+      return res.status(409).json({ error: "Configured stdio arguments are invalid." });
+    }
+
+    const sensitiveFlag = /(?:^|[-_])(token|secret|password|api[-_]?key|authorization|credential)(?:$|=)/i;
+    const sensitiveUrlPart = /([?&](?:access_token|api[-_]?key|token|secret|password)=)[^&#\s]+/gi;
+    let redactNext = false;
+    const args = (rawArgs as string[]).map((argument) => {
+      if (redactNext) {
+        redactNext = false;
+        return "[REDACTED]";
+      }
+      const equalIndex = argument.indexOf("=");
+      if (sensitiveFlag.test(argument)) {
+        if (equalIndex >= 0) return argument.slice(0, equalIndex + 1) + "[REDACTED]";
+        redactNext = true;
+        return argument.slice(0, 500);
+      }
+      return argument
+        .replace(/(https?:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@")
+        .replace(sensitiveUrlPart, "$1[REDACTED]")
+        .slice(0, 500);
+    });
+
+    const cwd = typeof target.config.cwd === "string" && target.config.cwd.trim().length > 0
+      ? path.resolve(path.dirname(server.configPath), target.config.cwd)
+      : path.dirname(server.configPath);
+    const env = target.config.env && typeof target.config.env === "object" && !Array.isArray(target.config.env)
+      ? target.config.env as Record<string, unknown>
+      : {};
+    return res.json({
+      command: command.slice(0, 500),
+      args,
+      argumentCount: args.length,
+      cwd,
+      environmentKeys: Object.keys(env).sort(),
+      sensitiveValuesRedacted: true
+    });
+  });
+
   app.post("/api/inspection/mcp/:serverId", async (req, res) => {
     const serverId = req.params.serverId;
     const server = graph.getDiscoveredMcpServers().find((item) => item.id === serverId);
