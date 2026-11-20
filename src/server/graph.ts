@@ -143,7 +143,36 @@ export class AgentGraph {
     if (!tool) return null;
     const affected = this.query("MATCH (a:Agent)-[:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer)-[:EXPOSES]->(t:Tool {id: $id}) RETURN DISTINCT properties(a) AS agent, properties(s) AS server", { id: toolId }).rows as Array<{ agent: Record<string, unknown>; server: Record<string, unknown> }>;
     const chain = this.query("MATCH (t:Tool {id: $id})-[:REQUIRES]->(c:Capability)<-[:RESTRICTS]-(p:Policy) RETURN properties(c) AS capability, properties(p) AS policy", { id: toolId }).rows as Array<{ capability: Record<string, unknown>; policy: Record<string, unknown> }>;
-    return { tool: tool.tool, affectedAgents: affected.map((row) => row.agent), servers: [...new Map(affected.map((row) => [String(row.server.id), row.server])).values()], controls: chain };
+    const inferred = this.query(
+      "MATCH (t:Tool {id: $id})-[r:REQUIRES]->(c:Capability) RETURN properties(c) AS capability, r.confidence AS confidence, r.source AS source",
+      { id: toolId }
+    ).rows as Array<{ capability: Record<string, unknown>; confidence?: number; source?: string }>;
+    const servers = [...new Map(affected.map((row) => [String(row.server.id), row.server])).values()];
+    const riskScore = Number(tool.tool.riskScore ?? 0);
+    const capabilities = inferred.map((row) => ({
+      ...row.capability,
+      confidence: row.confidence ?? null,
+      inferred: row.source === "schema-inference"
+    }));
+    const highSensitivityCapabilityCount = capabilities.filter((capability) =>
+      capability.sensitivity === "HIGH" || capability.sensitivity === "CRITICAL"
+    ).length;
+    return {
+      tool: tool.tool,
+      affectedAgents: affected.map((row) => row.agent),
+      servers,
+      controls: chain,
+      capabilities,
+      exposure: {
+        toolRiskScore: riskScore,
+        riskLevel: String(tool.tool.riskLevel ?? tool.tool.risk ?? "UNKNOWN"),
+        affectedAgentCount: affected.length,
+        affectedServerCount: servers.length,
+        capabilityCount: capabilities.length,
+        highSensitivityCapabilityCount,
+        serverExposureScore: servers.length ? Math.max(...servers.map((server) => Number(server.exposureScore ?? 0))) : 0
+      }
+    };
   }
 
   simulateCompromise(toolId: string) {

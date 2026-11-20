@@ -79,4 +79,4 @@ This repository is a standalone project for the Relate by Neo4j hackathon. It is
 
 ## Status
 
-Early implementation. The graph contains a deterministic demo dataset, local MCP configuration discovery and user-triggered live protocol inspection. Real execution-evidence ingestion remains planned.
+Early implementation. The graph includes deterministic demo data, local MCP discovery, user-triggered live inspection, deterministic schema-derived capability intelligence, exposure scoring and explicit agent-to-server association. Runtime execution telemetry and continuous policy enforcement remain planned.
