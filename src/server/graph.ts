@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { Database, type Connection } from "@relate/relate";
 import type { DiscoveredMcpServer, MCPDiscoveryResult } from "./discovery";
 import type { MCPInspectionOutcome } from "./mcp-inspector";
-import { aggregateExposure, inferToolCapabilities, INFERENCE_VERSION, type ToolCapabilityAnalysis } from "./capability-intelligence";
+import { aggregateExposure, inferToolCapabilities, INFERENCE_VERSION, CAPABILITY_DEFINITIONS, type ToolCapabilityAnalysis } from "./capability-intelligence";
 import { compareToolInventory, fingerprintToolInventory, fingerprintToolSnapshot, isHighImpactEffect, validateRuntimeEvent, type McpToolSnapshot } from "./runtime-security";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
@@ -363,6 +363,7 @@ export class AgentGraph {
         schemaInspectedAt: inspectedAt,
         schemaFingerprint: currentFingerprint,
         schemaVersion,
+        schemaAddedAfterBaseline: !previous && hasBaseline,
         ...(changed ? { schemaChangedAt: inspectedAt } : {})
       };
       this.query("MERGE (t:Tool {id: $id}) SET t += $props", { id: toolId, props });
@@ -542,7 +543,12 @@ export class AgentGraph {
     ).rows as Array<{ tool: Record<string, unknown> }>;
     const analyzedAt = new Date().toISOString();
     const analyses: Array<Record<string, unknown>> = [];
+    const capabilityDriftEvents: Array<Record<string, unknown>> = [];
     const exposureByServer = new Map<string, number[]>();
+    const previousServerStates = new Map(
+      (this.query("MATCH (s:MCPServer {discovered: true}) RETURN properties(s) AS server").rows as Array<{ server: Record<string, unknown> }>)
+        .map((row) => [String(row.server.id ?? ""), row.server] as const)
+    );
 
     for (const row of rows) {
       const tool = row.tool;
@@ -555,6 +561,80 @@ export class AgentGraph {
         outputSchema: this.parseStoredJson(tool.outputSchemaJson),
         annotations: this.parseStoredJson(tool.annotationsJson)
       });
+      const previousFindingsValue = this.parseStoredJson(tool.inferredCapabilitiesJson);
+      const previousFindings = Array.isArray(previousFindingsValue) ? previousFindingsValue as Array<Record<string, unknown>> : [];
+      const previousKeys = [...new Set(previousFindings.map((finding) => String(finding.key ?? "")).filter(Boolean))].sort();
+      const currentKeys = analysis.capabilities.map((finding) => finding.key).sort();
+      const previousRiskLevel = String(tool.riskLevel ?? "UNKNOWN");
+      const previousRiskScore = Number(tool.riskScore ?? 0);
+      const previousPermissionMode = String(tool.permissionMode ?? "UNKNOWN");
+      const hasPreviousAnalysis = typeof tool.capabilityAnalysisVersion === "string";
+      const newlyAddedTool = tool.schemaAddedAfterBaseline === true;
+      const addedCapabilityKeys = currentKeys.filter((key) => !previousKeys.includes(key));
+      const removedCapabilityKeys = previousKeys.filter((key) => !currentKeys.includes(key));
+      const riskRank: Record<string, number> = { UNKNOWN: -1, LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+      const permissionRank: Record<string, number> = { UNKNOWN: -1, READ: 0, WRITE: 1, MIXED: 2, EXECUTE: 3, DESTRUCTIVE: 4 };
+      const riskEscalated = (riskRank[analysis.riskLevel] ?? -1) > (riskRank[previousRiskLevel] ?? -1);
+      const modeEscalated = (permissionRank[analysis.permissionMode] ?? -1) > (permissionRank[previousPermissionMode] ?? -1);
+      const permissionEscalation = addedCapabilityKeys.length > 0 || riskEscalated || modeEscalated;
+      const hasCapabilityDrift = addedCapabilityKeys.length > 0 || removedCapabilityKeys.length > 0 ||
+        (hasPreviousAnalysis && (riskEscalated || modeEscalated ||
+          Boolean(tool.destructiveObserved) !== analysis.destructiveObserved ||
+          Boolean(tool.openWorldObserved) !== analysis.openWorldObserved));
+      if ((hasPreviousAnalysis && hasCapabilityDrift) || (newlyAddedTool && currentKeys.length > 0)) {
+        const introduced = analysis.capabilities.filter((finding) => addedCapabilityKeys.includes(finding.key));
+        const criticalIntroduction = introduced.some((finding) => finding.sensitivity === "CRITICAL");
+        const highIntroduction = introduced.some((finding) => finding.sensitivity === "HIGH");
+        const severity = criticalIntroduction ? "CRITICAL" : (permissionEscalation || highIntroduction ? "HIGH" : "MEDIUM");
+        const driftFingerprint = JSON.stringify({
+          previousKeys, currentKeys, previousRiskLevel, currentRiskLevel: analysis.riskLevel,
+          previousPermissionMode, currentPermissionMode: analysis.permissionMode,
+          destructiveObserved: analysis.destructiveObserved, openWorldObserved: analysis.openWorldObserved
+        });
+        const driftEvidenceId = "evidence-capability-drift-" + createHash("sha256")
+          .update(toolId + "\0" + analyzedAt + "\0" + driftFingerprint)
+          .digest("hex").slice(0, 20);
+        const driftProperties = {
+          id: driftEvidenceId,
+          kind: "MCP_CAPABILITY_DRIFT",
+          title: "Inferred capability change: " + String(tool.name ?? toolId),
+          result: permissionEscalation ? "PERMISSION_ESCALATION" : "CAPABILITIES_CHANGED",
+          severity,
+          source: "Deterministic schema-derived capability comparison",
+          assessmentBasis: "heuristic",
+          age: "just now",
+          analyzedAt,
+          toolId,
+          toolName: String(tool.name ?? toolId),
+          serverId: toolServerId,
+          previousCapabilityKeys: previousKeys,
+          currentCapabilityKeys: currentKeys,
+          addedCapabilityKeys,
+          removedCapabilityKeys,
+          permissionEscalation,
+          previousRiskLevel,
+          currentRiskLevel: analysis.riskLevel,
+          previousRiskScore,
+          currentRiskScore: analysis.riskScore,
+          previousPermissionMode,
+          currentPermissionMode: analysis.permissionMode,
+          destructiveObserved: analysis.destructiveObserved,
+          openWorldObserved: analysis.openWorldObserved,
+          summary: "Heuristic capability inference changed; this is not proof of tool use or exploitability."
+        };
+        this.query("MERGE (e:Evidence {id: $id}) SET e += $props", { id: driftEvidenceId, props: driftProperties });
+        this.query(
+          "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:DETECTS_CAPABILITY_DRIFT_ON]->(t)",
+          { evidenceId: driftEvidenceId, toolId }
+        );
+        for (const finding of introduced) {
+          this.query(
+            "MATCH (e:Evidence {id: $evidenceId}), (c:Capability {id: $capabilityId}) MERGE (e)-[:INTRODUCES_INFERENCE]->(c)",
+            { evidenceId: driftEvidenceId, capabilityId: finding.graphId }
+          );
+        }
+        capabilityDriftEvents.push(driftProperties);
+      }
 
       this.query(
         "MATCH (t:Tool {id: $id})-[r:REQUIRES]->(:Capability) WHERE r.source = 'schema-inference' DELETE r",
@@ -649,7 +729,15 @@ export class AgentGraph {
             analysisSummary: analysis.summary,
             readOnlyHint: analysis.readOnlyHint,
             destructiveHint: analysis.destructiveHint,
-            capabilityCount: analysis.capabilities.length
+            capabilityCount: analysis.capabilities.length,
+            schemaAddedAfterBaseline: false,
+            capabilityFingerprint: createHash("sha256").update(JSON.stringify({
+              keys: currentKeys,
+              riskLevel: analysis.riskLevel,
+              permissionMode: analysis.permissionMode,
+              destructiveObserved: analysis.destructiveObserved,
+              openWorldObserved: analysis.openWorldObserved
+            })).digest("hex")
           }
         }
       );
@@ -681,6 +769,43 @@ export class AgentGraph {
         { id }
       ).rows[0] as { total?: number };
       const uniqueCapabilities = [...new Set(capabilityRows.map((item) => item.key || item.name))].sort();
+      const previousServer = previousServerStates.get(id);
+      const previousServerKeys = previousServer && Array.isArray(previousServer.observedCapabilityKeys)
+        ? [...new Set(previousServer.observedCapabilityKeys.map(String))].sort()
+        : null;
+      const removedServerKeys = previousServerKeys
+        ? previousServerKeys.filter((key) => !uniqueCapabilities.includes(key))
+        : [];
+      if (removedServerKeys.length > 0) {
+        const removedFingerprint = JSON.stringify({ previousServerKeys, uniqueCapabilities, removedServerKeys });
+        const driftEvidenceId = "evidence-capability-drift-" + createHash("sha256")
+          .update(id + "\0" + analyzedAt + "\0" + removedFingerprint)
+          .digest("hex").slice(0, 20);
+        const driftProperties = {
+          id: driftEvidenceId,
+          kind: "MCP_CAPABILITY_DRIFT",
+          title: "Inferred server capabilities removed: " + String(previousServer?.name ?? id),
+          result: "PERMISSIONS_REDUCED",
+          severity: "INFO",
+          source: "Deterministic schema-derived capability comparison",
+          assessmentBasis: "heuristic",
+          age: "just now",
+          analyzedAt,
+          serverId: id,
+          previousCapabilityKeys: previousServerKeys,
+          currentCapabilityKeys: uniqueCapabilities,
+          addedCapabilityKeys: [],
+          removedCapabilityKeys: removedServerKeys,
+          permissionEscalation: false,
+          summary: "Previously inferred capability classes are no longer present in the inspected tool catalogue."
+        };
+        this.query("MERGE (e:Evidence {id: $id}) SET e += $props", { id: driftEvidenceId, props: driftProperties });
+        this.query(
+          "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:DETECTS_CAPABILITY_DRIFT_ON]->(s)",
+          { evidenceId: driftEvidenceId, serverId: id }
+        );
+        capabilityDriftEvents.push(driftProperties);
+      }
       this.query(
         "MATCH (s:MCPServer {id: $id, discovered: true}) SET s += $props",
         {
@@ -698,14 +823,73 @@ export class AgentGraph {
     }
 
     this.recalculateAgentExposure();
+    for (const id of exposureByServer.keys()) this.captureBlastRadiusSnapshot(id, analyzedAt);
     this.checkpoint();
     return {
       inferenceVersion: INFERENCE_VERSION,
       analyzedAt,
       analyzedTools: analyses.length,
       findings: analyses,
+      capabilityDriftEvents,
       summary: this.getCapabilityIntelligence().summary
     };
+  }
+
+  recordMonitorRun(run: {
+    startedAt: string;
+    completedAt: string;
+    discoveredServers: number;
+    inspectedServers: number;
+    failedServers: number;
+    skippedStdioServers: number;
+    skippedUnsupportedServers: number;
+    errors: number;
+  }) {
+    const id = "evidence-monitor-run-" + createHash("sha256")
+      .update(run.startedAt + "\0" + run.completedAt)
+      .digest("hex").slice(0, 20);
+    const properties = {
+      id,
+      kind: "MCP_MONITOR_RUN",
+      title: "Continuous MCP security scan",
+      result: run.failedServers > 0 || run.errors > 0 ? "PARTIAL" : "COMPLETED",
+      severity: run.failedServers > 0 || run.errors > 0 ? "MEDIUM" : "INFO",
+      source: "Scheduled MCP inspection monitor",
+      assessmentBasis: "read-only protocol and graph inspection",
+      age: "just now",
+      ...run
+    };
+    this.query("MERGE (e:Evidence {id: $id}) SET e += $props", { id, props: properties });
+    this.query(
+      "MERGE (m:MCPMonitor {id: 'mcp-monitor'}) SET m += $props",
+      {
+        id: "mcp-monitor",
+        props: {
+          lastRunId: id,
+          lastRunStartedAt: run.startedAt,
+          lastRunCompletedAt: run.completedAt,
+          lastRunResult: properties.result,
+          lastDiscoveredServers: run.discoveredServers,
+          lastInspectedServers: run.inspectedServers,
+          lastFailedServers: run.failedServers,
+          lastSkippedStdioServers: run.skippedStdioServers,
+          lastSkippedUnsupportedServers: run.skippedUnsupportedServers,
+          lastErrors: run.errors
+        }
+      }
+    );
+    this.query(
+      "MATCH (e:Evidence {id: $evidenceId}), (m:MCPMonitor {id: 'mcp-monitor'}) MERGE (e)-[:RECORDED_BY]->(m)",
+      { evidenceId: id }
+    );
+    return { id, ...properties };
+  }
+
+  getMonitorStatus() {
+    const row = this.query(
+      "MATCH (m:MCPMonitor {id: 'mcp-monitor'}) RETURN properties(m) AS monitor"
+    ).rows[0] as { monitor: Record<string, unknown> } | undefined;
+    return row?.monitor ?? null;
   }
 
   recordRuntimeEvent(input: unknown) {
@@ -810,6 +994,18 @@ export class AgentGraph {
       "MATCH (e:Evidence {kind: 'MCP_SCHEMA_DRIFT'}) RETURN properties(e) AS event ORDER BY e.inspectedAt DESC LIMIT $limit",
       { limit: boundedLimit }
     ).rows as Array<{ event: Record<string, unknown> }>;
+    const capabilityDriftRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_CAPABILITY_DRIFT'}) RETURN properties(e) AS event ORDER BY e.analyzedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
+    const blastRadiusRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_BLAST_RADIUS_CHANGE'}) RETURN properties(e) AS event ORDER BY e.observedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
+    const monitorRunRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_MONITOR_RUN'}) RETURN properties(e) AS event ORDER BY e.completedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
     const count = (kind: string, eventType?: string) => {
       const row = this.query(
         "MATCH (e:Evidence {kind: $kind" + (eventType ? ", eventType: $eventType" : "") + "}) RETURN count(e) AS total",
@@ -834,8 +1030,134 @@ export class AgentGraph {
       drift: {
         total: count("MCP_SCHEMA_DRIFT"),
         events: driftRows.map((row) => row.event)
+      },
+      capabilityDrift: {
+        total: count("MCP_CAPABILITY_DRIFT"),
+        permissionEscalations: Number((this.query("MATCH (e:Evidence {kind: 'MCP_CAPABILITY_DRIFT', result: 'PERMISSION_ESCALATION'}) RETURN count(e) AS total").rows[0] as { total?: number } | undefined)?.total ?? 0),
+        events: capabilityDriftRows.map((row) => row.event)
+      },
+      blastRadius: {
+        total: count("MCP_BLAST_RADIUS_CHANGE"),
+        expanded: Number((this.query("MATCH (e:Evidence {kind: 'MCP_BLAST_RADIUS_CHANGE', result: 'EXPANDED'}) RETURN count(e) AS total").rows[0] as { total?: number } | undefined)?.total ?? 0),
+        events: blastRadiusRows.map((row) => row.event)
+      },
+      monitorRuns: {
+        total: count("MCP_MONITOR_RUN"),
+        latest: this.getMonitorStatus(),
+        events: monitorRunRows.map((row) => row.event)
       }
     };
+  }
+
+  private captureBlastRadiusSnapshot(serverId: string, observedAt = new Date().toISOString()) {
+    const serverRow = this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) RETURN properties(s) AS server",
+      { id: serverId }
+    ).rows[0] as { server: Record<string, unknown> } | undefined;
+    if (!serverRow) return null;
+
+    const toolRows = this.query(
+      "MATCH (s:MCPServer {id: $id})-[:EXPOSES]->(t:Tool {mcpDiscovered: true}) RETURN properties(t) AS tool ORDER BY t.id",
+      { id: serverId }
+    ).rows as Array<{ tool: Record<string, unknown> }>;
+    const agentRows = this.query(
+      "MATCH (a:Agent)-[:CONNECTS_TO|USER_ASSOCIATED_WITH]->(s:MCPServer {id: $id}) RETURN DISTINCT a.id AS id",
+      { id: serverId }
+    ).rows as Array<{ id: string }>;
+    const agentIds = [...new Set(agentRows.map((row) => String(row.id)))].sort();
+    const capabilityKeys = [...new Set(toolRows.flatMap(({ tool }) => {
+      const value = this.parseStoredJson(tool.inferredCapabilitiesJson);
+      return Array.isArray(value) ? value.map((finding) => String((finding as Record<string, unknown>).key ?? "")).filter(Boolean) : [];
+    }))].sort();
+    const highSensitivityKeys = capabilityKeys.filter((key) => {
+      const definition = CAPABILITY_DEFINITIONS.find((item) => item.key === key);
+      return definition?.sensitivity === "HIGH" || definition?.sensitivity === "CRITICAL";
+    });
+    const highRiskToolCount = toolRows.filter(({ tool }) => ["HIGH", "CRITICAL"].includes(String(tool.riskLevel ?? ""))).length;
+    const criticalToolCount = toolRows.filter(({ tool }) => tool.riskLevel === "CRITICAL").length;
+    const snapshot = {
+      agentIds,
+      affectedAgentCount: agentIds.length,
+      toolIds: toolRows.map(({ tool }) => String(tool.id ?? "")).sort(),
+      toolCount: toolRows.length,
+      highRiskToolCount,
+      criticalToolCount,
+      capabilityKeys,
+      highSensitivityCapabilityKeys: highSensitivityKeys,
+      exposureScore: Number(serverRow.server.exposureScore ?? 0),
+      exposureLevel: String(serverRow.server.exposureLevel ?? "UNKNOWN")
+    };
+    const fingerprint = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+    const previousFingerprint = String(serverRow.server.blastRadiusFingerprint ?? "");
+    const previousValue = this.parseStoredJson(serverRow.server.blastRadiusSnapshotJson);
+    const previous = previousValue !== null && typeof previousValue === "object" && !Array.isArray(previousValue)
+      ? previousValue as Record<string, unknown>
+      : null;
+
+    if (previousFingerprint && previousFingerprint !== fingerprint && previous) {
+      const previousAgents = Array.isArray(previous.agentIds) ? previous.agentIds.map(String) : [];
+      const previousCapabilities = Array.isArray(previous.capabilityKeys) ? previous.capabilityKeys.map(String) : [];
+      const addedAgents = agentIds.filter((id) => !previousAgents.includes(id));
+      const removedAgents = previousAgents.filter((id) => !agentIds.includes(id));
+      const addedCapabilities = capabilityKeys.filter((key) => !previousCapabilities.includes(key));
+      const removedCapabilities = previousCapabilities.filter((key) => !capabilityKeys.includes(key));
+      const previousHighRisk = Number(previous.highRiskToolCount ?? 0);
+      const previousCritical = Number(previous.criticalToolCount ?? 0);
+      const previousScore = Number(previous.exposureScore ?? 0);
+      const expanded = addedAgents.length > 0 || addedCapabilities.length > 0 ||
+        highRiskToolCount > previousHighRisk || criticalToolCount > previousCritical ||
+        snapshot.toolCount > Number(previous.toolCount ?? 0) || snapshot.exposureScore > previousScore;
+      const evidenceId = "evidence-blast-radius-" + createHash("sha256")
+        .update(serverId + "\0" + observedAt + "\0" + fingerprint)
+        .digest("hex").slice(0, 20);
+      const evidenceProperties = {
+        id: evidenceId,
+        kind: "MCP_BLAST_RADIUS_CHANGE",
+        title: "MCP blast radius changed: " + String(serverRow.server.name ?? serverId),
+        result: expanded ? "EXPANDED" : "CHANGED",
+        severity: highRiskToolCount > previousHighRisk || criticalToolCount > previousCritical ||
+          snapshot.exposureScore > previousScore || addedCapabilities.some((key) =>
+            CAPABILITY_DEFINITIONS.find((item) => item.key === key)?.sensitivity === "CRITICAL"
+          ) ? "HIGH" : "MEDIUM",
+        source: "Graph relationship and capability snapshot comparison",
+        assessmentBasis: "graph-derived exposure",
+        age: "just now",
+        observedAt,
+        serverId,
+        serverName: String(serverRow.server.name ?? serverId),
+        addedAgents,
+        removedAgents,
+        addedCapabilities,
+        removedCapabilities,
+        previousSnapshotJson: JSON.stringify(previous),
+        currentSnapshotJson: JSON.stringify(snapshot),
+        summary: "The set of connected agents, inferred permissions, or exposed tools changed. This is a graph exposure comparison, not evidence of exploitation."
+      };
+      this.query("MERGE (e:Evidence {id: $id}) SET e += $props", {
+        id: evidenceId,
+        props: evidenceProperties
+      });
+      this.query(
+        "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:TRACKS_BLAST_RADIUS_ON]->(s)",
+        { evidenceId, serverId }
+      );
+      for (const agentId of [...new Set([...previousAgents, ...agentIds])]) {
+        this.query(
+          "MATCH (e:Evidence {id: $evidenceId}), (a:Agent {id: $agentId}) MERGE (e)-[:AFFECTS_AGENT]->(a)",
+          { evidenceId, agentId }
+        );
+      }
+      this.query(
+        "MATCH (s:MCPServer {id: $id}) SET s.lastBlastRadiusChangeAt = $observedAt",
+        { id: serverId, observedAt }
+      );
+    }
+
+    this.query(
+      "MATCH (s:MCPServer {id: $id}) SET s.blastRadiusFingerprint = $fingerprint, s.blastRadiusSnapshotJson = $snapshot, s.blastRadiusSnapshotAt = $observedAt",
+      { id: serverId, fingerprint, snapshot: JSON.stringify(snapshot), observedAt }
+    );
+    return snapshot;
   }
 
   private recalculateAgentExposure() {
@@ -879,6 +1201,7 @@ export class AgentGraph {
       { agentId, serverId }
     );
     this.recalculateAgentExposure();
+    this.captureBlastRadiusSnapshot(serverId);
     this.checkpoint();
     return { ok: true as const, agentId, serverId };
   }
@@ -889,6 +1212,7 @@ export class AgentGraph {
       { agentId, serverId }
     );
     this.recalculateAgentExposure();
+    this.captureBlastRadiusSnapshot(serverId);
     this.checkpoint();
     return { ok: true as const, agentId, serverId };
   }
