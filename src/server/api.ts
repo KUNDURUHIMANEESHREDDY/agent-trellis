@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { AgentGraph } from "./graph";
 import { discoverMcpConfigurations, resolveMcpServerConfig } from "./discovery";
 import { inspectMcpServer } from "./mcp-inspector";
@@ -29,6 +30,25 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/evidence", (_req, res) => res.json(graph.getEvidence()));
   app.get("/api/discovery/mcp", (_req, res) => res.json(graph.getDiscoveredMcpServers()));
   app.get("/api/inspection/mcp", (_req, res) => res.json(graph.getMcpInspections()));
+  app.get("/api/runtime/monitoring", (_req, res) => res.json({
+    ...graph.getRuntimeMonitoring(),
+    telemetryConfigured: Boolean(process.env.AGENT_TRELLIS_RUNTIME_TOKEN)
+  }));
+  app.post("/api/runtime/events", (req, res) => {
+    const configuredToken = process.env.AGENT_TRELLIS_RUNTIME_TOKEN;
+    if (!configuredToken) {
+      return res.status(503).json({ error: "Runtime telemetry ingestion is disabled. Configure AGENT_TRELLIS_RUNTIME_TOKEN and restart the API." });
+    }
+    const suppliedToken = req.header("x-agent-trellis-token") ?? "";
+    const expectedBytes = Buffer.from(configuredToken);
+    const suppliedBytes = Buffer.from(suppliedToken);
+    const authorized = expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+    if (!authorized) return res.status(401).json({ error: "Invalid runtime telemetry token." });
+
+    const result = graph.recordRuntimeEvent(req.body);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  });
   app.get("/api/capabilities/intelligence", (_req, res) => res.json(graph.getCapabilityIntelligence()));
   app.post("/api/capabilities/analyze", (req, res) => {
     const serverId = typeof req.body?.serverId === "string" ? req.body.serverId : undefined;

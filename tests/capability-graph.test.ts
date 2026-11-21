@@ -88,4 +88,80 @@ describe("AgentGraph capability intelligence", () => {
     expect(graph.getImpact("mcp-tool-not-a-tool")).toBeNull();
     graph.checkpoint();
   });
+
+  it("records schema drift only after a baseline and refreshes capability analysis", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trellis-drift-"));
+    temporaryDirectories.push(dir);
+    const graph = new AgentGraph(path.join(dir, "graph"));
+    await graph.initialize();
+    const configPath = path.join(dir, ".mcp.json");
+    const server = {
+      id: "mcp-drift-server",
+      hostId: "mcp-drift-host",
+      hostName: "Drift test host",
+      source: "test",
+      configPath,
+      configScope: "workspace",
+      name: "drift-test",
+      transport: "http" as const,
+      endpoint: "https://drift.example.test/mcp",
+      argumentCount: 0,
+      environmentKeys: [],
+      headerNames: [],
+      credentialHints: false
+    };
+    graph.syncMcpDiscovery({ scannedConfigPaths: [configPath], servers: [server], diagnostics: [] });
+    const inspection = (inspectedAt: string, tools: Array<Record<string, unknown>>, success = true) => graph.recordMcpInspection({
+      serverId: server.id,
+      serverName: server.name,
+      inspectedAt,
+      success,
+      transport: "http",
+      declaredCapabilities: ["tools"],
+      observedCapabilities: success ? ["tools"] : [],
+      capabilityComparisons: [
+        { capability: "tools", declared: true, observed: success, status: success ? "consistent" : "missing" },
+        { capability: "resources", declared: false, observed: null, status: "not_checked" },
+        { capability: "prompts", declared: false, observed: null, status: "not_checked" }
+      ],
+      tools: tools as any
+    });
+
+    inspection("2026-11-20T13:00:00.000Z", [{
+      name: "read_file",
+      description: "Read a file.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } } }
+    }]);
+    expect(graph.getRuntimeMonitoring().drift.total).toBe(0);
+
+    inspection("2026-11-20T13:01:00.000Z", [{
+      name: "read_file",
+      description: "Read a file and return metadata.",
+      inputSchema: { type: "object", properties: { path: { type: "string" }, recursive: { type: "boolean" } } }
+    }, {
+      name: "write_file",
+      description: "Write a file.",
+      inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } }
+    }]);
+    const monitoring = graph.getRuntimeMonitoring();
+    expect(monitoring.drift.total).toBe(1);
+    expect(monitoring.drift.events[0].changeCount).toBe(2);
+    expect(graph.getCapabilityIntelligence().summary.tools).toBe(2);
+
+    inspection("2026-11-20T13:02:00.000Z", [{
+      name: "read_file",
+      description: "Read a file and return metadata.",
+      inputSchema: { type: "object", properties: { path: { type: "string" }, recursive: { type: "boolean" } } }
+    }, {
+      name: "write_file",
+      description: "Write a file.",
+      inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } }
+    }]);
+    expect(graph.getRuntimeMonitoring().drift.total).toBe(1);
+
+    inspection("2026-11-20T13:03:00.000Z", [], false);
+    expect(graph.getCapabilityIntelligence().summary.tools).toBe(2);
+    expect(graph.getRuntimeMonitoring().drift.total).toBe(1);
+    graph.checkpoint();
+  });
 });
