@@ -6,10 +6,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/server/api";
 import { AgentGraph } from "../src/server/graph";
 import { MCPContinuousMonitor } from "../src/server/monitor";
+import { discoverMcpConfigurations } from "../src/server/discovery";
 
 describe("continuous monitor API", () => {
   let root = "";
+  const previousWorkspaceRoots = process.env.AGENT_TRELLIS_WORKSPACES;
   afterEach(() => {
+    if (previousWorkspaceRoots === undefined) delete process.env.AGENT_TRELLIS_WORKSPACES;
+    else process.env.AGENT_TRELLIS_WORKSPACES = previousWorkspaceRoots;
     if (root) fs.rmSync(root, { recursive: true, force: true });
     root = "";
   });
@@ -27,26 +31,21 @@ describe("continuous monitor API", () => {
         inspect: async () => { throw new Error("No servers should be inspected"); }
       }
     });
-    const server = {
-      id: "locked-api-server",
-      hostId: "locked-api-host",
-      hostName: "API lock host",
-      source: "test",
-      configPath: path.join(root, "locked.json"),
-      configScope: "workspace",
-      name: "locked-api-server",
-      transport: "http" as const,
-      endpoint: "https://locked.example.test/mcp",
-      argumentCount: 0,
-      environmentKeys: [],
-      headerNames: [],
-      credentialHints: false
-    };
-    graph.syncMcpDiscovery({ scannedConfigPaths: [server.configPath], servers: [server], diagnostics: [] });
+    const configPath = path.join(root, ".mcp.json");
+    fs.writeFileSync(configPath, JSON.stringify({
+      mcpServers: {
+        lockedServer: { type: "http", url: "https://locked.example.test/mcp" }
+      }
+    }), "utf8");
+    process.env.AGENT_TRELLIS_WORKSPACES = root;
+    const discovery = discoverMcpConfigurations({ workspaceRoots: [process.cwd(), root] });
+    const server = discovery.servers.find((item) => item.name === "lockedServer");
+    expect(server).toBeDefined();
+    graph.syncMcpDiscovery(discovery);
     const app = createApp(graph, monitor);
-    expect(monitor.acquireServer(server.id)).toBe(true);
-    await request(app).post("/api/inspection/mcp/" + server.id).send({}).expect(409);
-    monitor.releaseServer(server.id);
+    expect(monitor.acquireServer(server!.id)).toBe(true);
+    await request(app).post("/api/inspection/mcp/" + server!.id).send({}).expect(409);
+    monitor.releaseServer(server!.id);
     await request(app).get("/api/monitor/status").expect(200).then((res) => {
       expect(res.body.configuration).toMatchObject({ enabled: false, intervalMs: 0, includeStdio: false });
       expect(res.body.lastPersistedRun).toBeNull();
