@@ -119,7 +119,7 @@ describe("AgentGraph MCP discovery ingestion", () => {
     expect(afterFailure.nodes.some((node) => node.id === toolId)).toBe(true);
     expect(graph.getMcpInspections()).toHaveLength(1);
     expect(graph.getMcpInspections()[0].errorSummary).toBe("ConnectionError");
-    expect(graph.getOverview().evidence).toBe(6);
+    expect(graph.getOverview().evidence).toBe(7); // Inspection plus automatic capability-analysis evidence.
 
     graph.checkpoint();
     fs.rmSync(dir, { recursive: true, force: true });
