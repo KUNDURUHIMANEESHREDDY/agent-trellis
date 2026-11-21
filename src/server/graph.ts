@@ -5,6 +5,7 @@ import { Database, type Connection } from "@relate/relate";
 import type { DiscoveredMcpServer, MCPDiscoveryResult } from "./discovery";
 import type { MCPInspectionOutcome } from "./mcp-inspector";
 import { aggregateExposure, inferToolCapabilities, INFERENCE_VERSION, type ToolCapabilityAnalysis } from "./capability-intelligence";
+import { compareToolInventory, fingerprintToolInventory, fingerprintToolSnapshot, isHighImpactEffect, validateRuntimeEvent, type McpToolSnapshot } from "./runtime-security";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
 export type GraphEdge = { source: string; target: string; type: string; properties: Record<string, unknown> };
@@ -311,9 +312,23 @@ export class AgentGraph {
     );
 
     const existingTools = this.query(
-      "MATCH (t:Tool {mcpDiscovered: true, mcpServerId: $serverId}) RETURN t.id AS id",
+      "MATCH (t:Tool {mcpDiscovered: true, mcpServerId: $serverId}) RETURN properties(t) AS tool",
       { serverId: outcome.serverId }
-    ).rows as Array<{ id: string }>;
+    ).rows as Array<{ tool: Record<string, unknown> }>;
+    const existingByName = new Map(existingTools.map((row) => [String(row.tool.name ?? ""), row.tool]));
+    const previousSnapshots: McpToolSnapshot[] = existingTools.map(({ tool }) => ({
+      name: String(tool.name ?? ""),
+      description: String(tool.description ?? ""),
+      inputSchema: this.parseStoredJson(tool.inputSchemaJson),
+      ...(String(tool.outputSchemaJson ?? "").length > 0 ? { outputSchema: this.parseStoredJson(tool.outputSchemaJson) } : {}),
+      ...(String(tool.annotationsJson ?? "").length > 0 ? { annotations: this.parseStoredJson(tool.annotationsJson) } : {})
+    }));
+    const canReconcileTools = outcome.success && outcome.observedCapabilities.includes("tools");
+    const hasBaseline = typeof server.server.schemaInventoryFingerprint === "string" || existingTools.length > 0;
+    const driftChanges = canReconcileTools && hasBaseline
+      ? compareToolInventory(previousSnapshots, outcome.tools)
+      : [];
+    const currentInventoryFingerprint = fingerprintToolInventory(outcome.tools);
     const retainedToolIds = new Set<string>();
 
     for (const tool of outcome.tools) {
@@ -321,6 +336,21 @@ export class AgentGraph {
         .update(outcome.serverId + "\0" + tool.name)
         .digest("hex").slice(0, 20);
       retainedToolIds.add(toolId);
+      const previous = existingByName.get(tool.name);
+      const currentFingerprint = fingerprintToolSnapshot(tool);
+      const previousFingerprint = previous
+        ? String(previous.schemaFingerprint ?? fingerprintToolSnapshot({
+          name: String(previous.name ?? ""),
+          description: String(previous.description ?? ""),
+          inputSchema: this.parseStoredJson(previous.inputSchemaJson),
+          ...(String(previous.outputSchemaJson ?? "").length > 0 ? { outputSchema: this.parseStoredJson(previous.outputSchemaJson) } : {}),
+          ...(String(previous.annotationsJson ?? "").length > 0 ? { annotations: this.parseStoredJson(previous.annotationsJson) } : {})
+        }))
+        : "";
+      const changed = Boolean(previous && previousFingerprint !== currentFingerprint);
+      const schemaVersion = previous
+        ? Math.max(1, Number(previous.schemaVersion ?? 1)) + (changed ? 1 : 0)
+        : 1;
       const props = {
         id: toolId,
         name: tool.name,
@@ -330,7 +360,10 @@ export class AgentGraph {
         inputSchemaJson: JSON.stringify(tool.inputSchema),
         outputSchemaJson: tool.outputSchema === undefined ? "" : JSON.stringify(tool.outputSchema),
         annotationsJson: tool.annotations === undefined ? "" : JSON.stringify(tool.annotations),
-        schemaInspectedAt: inspectedAt
+        schemaInspectedAt: inspectedAt,
+        schemaFingerprint: currentFingerprint,
+        schemaVersion,
+        ...(changed ? { schemaChangedAt: inspectedAt } : {})
       };
       this.query("MERGE (t:Tool {id: $id}) SET t += $props", { id: toolId, props });
       this.query(
@@ -339,13 +372,77 @@ export class AgentGraph {
       );
     }
 
-    const canReconcileTools = outcome.success && outcome.observedCapabilities.includes("tools");
     if (canReconcileTools) {
-      for (const tool of existingTools) {
-        if (!retainedToolIds.has(tool.id)) {
-          this.query("MATCH (t:Tool {id: $id}) DETACH DELETE t", { id: tool.id });
+      for (const row of existingTools) {
+        const id = String(row.tool.id ?? "");
+        if (!retainedToolIds.has(id)) {
+          this.query("MATCH (t:Tool {id: $id}) DETACH DELETE t", { id });
         }
       }
+    }
+
+    if (canReconcileTools) {
+      const driftStatus = !hasBaseline ? "BASELINED" : driftChanges.length > 0 ? "CHANGED" : "STABLE";
+      this.query(
+        "MATCH (s:MCPServer {id: $id, discovered: true}) SET s += $props",
+        {
+          id: outcome.serverId,
+          props: {
+            schemaInventoryFingerprint: currentInventoryFingerprint,
+            schemaDriftStatus: driftStatus,
+            schemaDriftCount: driftChanges.length,
+            lastSchemaCheckedAt: inspectedAt,
+            ...(driftChanges.length > 0 ? { lastSchemaDriftAt: inspectedAt } : {})
+          }
+        }
+      );
+
+      if (driftChanges.length > 0) {
+        const driftEvidenceId = "evidence-drift-" + createHash("sha256")
+          .update(outcome.serverId + "\0" + inspectedAt + "\0" + currentInventoryFingerprint)
+          .digest("hex").slice(0, 20);
+        const highImpactDrift = driftChanges.some((change) =>
+          change.changeType === "REMOVED" || change.changedFields.includes("annotations")
+        );
+        this.query(
+          "MERGE (e:Evidence {id: $id}) SET e += $props",
+          {
+            id: driftEvidenceId,
+            props: {
+              id: driftEvidenceId,
+              kind: "MCP_SCHEMA_DRIFT",
+              title: "MCP tool schema drift: " + outcome.serverName,
+              result: "CHANGED",
+              severity: highImpactDrift ? "HIGH" : "MEDIUM",
+              source: "Successful MCP inspection comparison",
+              age: "just now",
+              serverId: outcome.serverId,
+              serverName: outcome.serverName,
+              inspectedAt,
+              changeCount: driftChanges.length,
+              changesJson: JSON.stringify(driftChanges),
+              previousInventoryFingerprint: String(server.server.schemaInventoryFingerprint ?? ""),
+              currentInventoryFingerprint
+            }
+          }
+        );
+        this.query(
+          "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:DETECTS_DRIFT_ON]->(s)",
+          { evidenceId: driftEvidenceId, serverId: outcome.serverId }
+        );
+        for (const change of driftChanges) {
+          const currentToolId = "mcp-tool-" + createHash("sha256")
+            .update(outcome.serverId + "\0" + change.toolName)
+            .digest("hex").slice(0, 20);
+          this.query(
+            "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:AFFECTS]->(t)",
+            { evidenceId: driftEvidenceId, toolId: currentToolId }
+          );
+        }
+      }
+
+      // Refresh inferred capabilities and exposure against the newly inspected tool inventory.
+      this.analyzeMcpCapabilities(outcome.serverId);
     }
 
     const evidenceProps = {
@@ -608,6 +705,136 @@ export class AgentGraph {
       analyzedTools: analyses.length,
       findings: analyses,
       summary: this.getCapabilityIntelligence().summary
+    };
+  }
+
+  recordRuntimeEvent(input: unknown) {
+    const validation = validateRuntimeEvent(input);
+    if (!validation.ok) return { ok: false as const, status: 400, error: validation.error };
+    const event = validation.event;
+    const serverRow = this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) RETURN properties(s) AS server",
+      { id: event.serverId }
+    ).rows[0] as { server: Record<string, unknown> } | undefined;
+    if (!serverRow) return { ok: false as const, status: 404, error: "Discovered MCP server not found." };
+
+    const toolRow = this.query(
+      "MATCH (s:MCPServer {id: $serverId})-[:EXPOSES]->(t:Tool {mcpDiscovered: true, name: $toolName}) RETURN properties(t) AS tool",
+      { serverId: event.serverId, toolName: event.toolName }
+    ).rows[0] as { tool: Record<string, unknown> } | undefined;
+    if (!toolRow) return { ok: false as const, status: 404, error: "Tool is not present in the latest inspected inventory." };
+
+    let agentName: string | undefined;
+    if (event.agentId) {
+      const agentRow = this.query(
+        "MATCH (a:Agent {id: $id}) RETURN a.name AS name",
+        { id: event.agentId }
+      ).rows[0] as { name?: string } | undefined;
+      if (!agentRow) return { ok: false as const, status: 404, error: "Agent not found." };
+      agentName = agentRow.name;
+    }
+
+    const evidenceId = "evidence-runtime-" + createHash("sha256")
+      .update(event.serverId + "\0" + event.eventId)
+      .digest("hex").slice(0, 24);
+    const eventPayloadHash = createHash("sha256").update(JSON.stringify(event)).digest("hex");
+    const existing = this.query(
+      "MATCH (e:Evidence {id: $id, kind: 'MCP_RUNTIME_EVENT'}) RETURN properties(e) AS event",
+      { id: evidenceId }
+    ).rows[0] as { event: Record<string, unknown> } | undefined;
+    if (existing) {
+      if (existing.event.eventPayloadHash !== eventPayloadHash) {
+        return { ok: false as const, status: 409, error: "eventId was already used for a different event payload." };
+      }
+      return { ok: true as const, duplicate: true, evidenceId, eventType: event.eventType };
+    }
+
+    const highImpact = isHighImpactEffect(event.effect);
+    const severity = event.eventType === "SIDE_EFFECT_OBSERVED"
+      ? (highImpact ? "HIGH" : "MEDIUM")
+      : event.eventType === "CALL_FAILED" ? "LOW" : "INFO";
+    const result = event.eventType === "POLICY_DENIED" ? "PASS" : "OBSERVED";
+    const eventProperties = {
+      id: evidenceId,
+      kind: "MCP_RUNTIME_EVENT",
+      title: event.eventType + ": " + event.toolName,
+      result,
+      severity,
+      source: "Authenticated runtime adapter",
+      age: "just now",
+      eventId: event.eventId,
+      executionId: event.executionId,
+      eventType: event.eventType,
+      observedAt: event.observedAt,
+      receivedAt: new Date().toISOString(),
+      serverId: event.serverId,
+      serverName: String(serverRow.server.name ?? ""),
+      toolId: String(toolRow.tool.id ?? ""),
+      toolName: event.toolName,
+      ...(event.agentId ? { agentId: event.agentId, agentName: agentName ?? "" } : {}),
+      ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+      ...(event.effect ? { effect: event.effect } : {}),
+      ...(event.policyName ? { policyName: event.policyName } : {}),
+      ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+      eventPayloadHash
+    };
+    this.query("CREATE (e:Evidence {id: $id}) SET e += $props", {
+      id: evidenceId,
+      props: eventProperties
+    });
+    this.query(
+      "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:OBSERVED_ON]->(s)",
+      { evidenceId, serverId: event.serverId }
+    );
+    this.query(
+      "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:OBSERVES]->(t)",
+      { evidenceId, toolId: String(toolRow.tool.id ?? "") }
+    );
+    if (event.agentId) {
+      this.query(
+        "MATCH (a:Agent {id: $agentId}), (e:Evidence {id: $evidenceId}) MERGE (a)-[:HAS_RUNTIME_EVIDENCE]->(e)",
+        { agentId: event.agentId, evidenceId }
+      );
+    }
+    this.checkpoint();
+    return { ok: true as const, duplicate: false, evidenceId, eventType: event.eventType, severity, result };
+  }
+
+  getRuntimeMonitoring(limit = 50) {
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const eventRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT'}) RETURN properties(e) AS event ORDER BY e.observedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
+    const driftRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_SCHEMA_DRIFT'}) RETURN properties(e) AS event ORDER BY e.inspectedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
+    const count = (kind: string, eventType?: string) => {
+      const row = this.query(
+        "MATCH (e:Evidence {kind: $kind" + (eventType ? ", eventType: $eventType" : "") + "}) RETURN count(e) AS total",
+        eventType ? { kind, eventType } : { kind }
+      ).rows[0] as { total?: number } | undefined;
+      return Number(row?.total ?? 0);
+    };
+    const highSeveritySideEffects = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT', eventType: 'SIDE_EFFECT_OBSERVED', severity: 'HIGH'}) RETURN count(e) AS total"
+    ).rows[0] as { total?: number } | undefined;
+    return {
+      summary: {
+        totalEvents: count("MCP_RUNTIME_EVENT"),
+        callsStarted: count("MCP_RUNTIME_EVENT", "CALL_STARTED"),
+        callsSucceeded: count("MCP_RUNTIME_EVENT", "CALL_SUCCEEDED"),
+        callsFailed: count("MCP_RUNTIME_EVENT", "CALL_FAILED"),
+        policyDenials: count("MCP_RUNTIME_EVENT", "POLICY_DENIED"),
+        sideEffects: count("MCP_RUNTIME_EVENT", "SIDE_EFFECT_OBSERVED"),
+        highSeveritySideEffects: Number(highSeveritySideEffects?.total ?? 0)
+      },
+      events: eventRows.map((row) => row.event),
+      drift: {
+        total: count("MCP_SCHEMA_DRIFT"),
+        events: driftRows.map((row) => row.event)
+      }
     };
   }
 
