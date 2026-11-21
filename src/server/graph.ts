@@ -549,6 +549,12 @@ export class AgentGraph {
       (this.query("MATCH (s:MCPServer {discovered: true}) RETURN properties(s) AS server").rows as Array<{ server: Record<string, unknown> }>)
         .map((row) => [String(row.server.id ?? ""), row.server] as const)
     );
+    // A successful tools/list response with zero tools is still a valid inventory.
+    // Keep the server in the comparison set so removal of its final tool/permission
+    // is recorded rather than silently skipped because there are no tool rows.
+    for (const [id] of previousServerStates) {
+      if ((!serverId || serverId === id) && !exposureByServer.has(id)) exposureByServer.set(id, []);
+    }
 
     for (const row of rows) {
       const tool = row.tool;

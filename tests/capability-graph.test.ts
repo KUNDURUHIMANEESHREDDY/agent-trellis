@@ -174,6 +174,12 @@ describe("AgentGraph capability intelligence", () => {
     inspection("2026-11-20T13:03:00.000Z", [], false);
     expect(graph.getCapabilityIntelligence().summary.tools).toBe(2);
     expect(graph.getRuntimeMonitoring().drift.total).toBe(1);
+
+    inspection("2026-11-20T13:04:00.000Z", [], true);
+    expect(graph.getCapabilityIntelligence().summary.tools).toBe(0);
+    expect(graph.getRuntimeMonitoring().capabilityDrift.events.some(
+      (event: any) => event.result === "PERMISSIONS_REDUCED" && event.removedCapabilityKeys.includes("filesystem_write")
+    )).toBe(true);
     graph.checkpoint();
   });
 });
