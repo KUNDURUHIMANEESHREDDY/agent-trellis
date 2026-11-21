@@ -51,7 +51,31 @@ Discovery supports Claude Desktop, Claude Code user/local configuration, Cursor 
 
 Set AGENT_TRELLIS_RUNTIME_TOKEN to a unique random secret in the API environment and restart AgentTrellis. A trusted execution adapter can then send normalized events to POST /api/runtime/events with the x-agent-trellis-token header. Use a stable, unique eventId per event and include executionId, serverId, toolName, eventType and an optional ISO timestamp/duration. Supported event types are CALL_STARTED, CALL_SUCCEEDED, CALL_FAILED, POLICY_DENIED and SIDE_EFFECT_OBSERVED. Side-effect events must include a normalized effect such as filesystem_write or database_write.
 
-The ingestion validator deliberately rejects raw arguments, results, credentials, headers and environment values. It stores only normalized metadata and hashes for idempotency; it does not independently inspect tool inputs or outputs. GET /api/runtime/monitoring exposes the recent event ledger and schema-drift history. Runtime ingestion is disabled when no token is configured. Events are trusted-adapter reports, not proof of exploitability.
+The ingestion validator deliberately rejects raw arguments, results, credentials, headers and environment values. It stores only normalized metadata and hashes for idempotency; it does not independently inspect tool inputs or outputs. POST /api/runtime/events is **adapter-reported** telemetry: the API assigns this provenance itself, even if a client adds a `sourceKind` field to its payload.
+
+For direct observation of MCP tool-call traffic, route the agent's remote MCP connection through the local AgentTrellis gateway:
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/api/runtime/mcp/<discovered-server-id>",
+      "headers": {
+        "x-agent-trellis-token": "${AGENT_TRELLIS_RUNTIME_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Discover and inspect the upstream server first so its tool inventory is linked to the graph. The gateway resolves the upstream URL and configured headers from the discovered local MCP configuration; clients cannot submit arbitrary upstream URLs. It consumes the AgentTrellis token locally and does not forward it to the upstream. Use the discovered server ID shown by MCP discovery. The gateway currently proxies Streamable HTTP configurations only; legacy SSE and stdio execution are not intercepted.
+
+For each correlated JSON-RPC `tools/call`, the gateway records `CALL_STARTED` and, when it can parse a matching response, `CALL_SUCCEEDED` or `CALL_FAILED`. Response classification is limited to HTTP failures or JSON-RPC/tool-result errors. Large (>256 KiB), streaming or uncorrelated responses may retain only the start event. Tool arguments, result bodies and configured credentials are never written to the graph. Gateway evidence is labelled **gateway-observed** because AgentTrellis sees the request and response at its own proxy boundary; this does not prove that a remote tool performed a filesystem, database, network or other real-world side effect.
+
+Adapters may still submit normalized `SIDE_EFFECT_OBSERVED` events, but these remain **adapter-reported** claims, not independent observations. The gateway does not infer side effects from tool names, descriptions or schemas. GET /api/runtime/monitoring exposes recent runtime events and separate counts for gateway-observed and adapter-reported records. Runtime telemetry and gateway routing are disabled when no token is configured.
+
+Evidence provenance is intentionally split: **gateway-observed** = MCP request/response visible at the AgentTrellis proxy; **adapter-reported** = metadata asserted by an authenticated execution adapter; **heuristic** = schema/description-derived capability and permission inference. Heuristic capability drift and graph-derived blast radius do not prove execution, enforcement, exploitability or side effects.
 
 Continuous MCP monitoring runs in the API process. By default it performs a scan at startup and every five minutes after that. Set AGENT_TRELLIS_MONITOR_INTERVAL_MS to another interval in milliseconds; set it to 0 to disable automatic scheduling. HTTP and SSE MCP servers are reinspected using read-only protocol metadata methods. Local stdio servers are skipped by default. Set AGENT_TRELLIS_MONITOR_STDIO=true only when you explicitly accept automatic local process launches; manual inspection still requires its existing confirmation flow.
 
@@ -59,7 +83,7 @@ Successful inspections compare tool additions/removals and description, input/ou
 
 Agent/server associations, tool counts, inferred permission sets and exposure scores are snapshotted. Changes are recorded as MCP_BLAST_RADIUS_CHANGE evidence, including expanded or reduced connected-agent sets. These are graph-derived exposure changes, not evidence that an agent exercised the capability.
 
-GET /api/monitor/status returns scheduler configuration and the last persisted scan. POST /api/monitor/run starts an immediate cycle. GET /api/runtime/monitoring includes schema, capability, blast-radius, runtime-event and monitor-run histories. A trusted execution adapter must still be connected to an agent execution path to report actual calls and side effects; those events remain separately labelled as adapter-reported behaviour.
+GET /api/monitor/status returns scheduler configuration and the last persisted scan. POST /api/monitor/run starts an immediate cycle. GET /api/runtime/monitoring includes schema, capability, blast-radius, runtime-event and monitor-run histories, including separate runtime-event provenance counts.
 
 ### Live MCP inspection
 
@@ -72,6 +96,7 @@ HTTP and SSE endpoints use the configured headers only in memory. Credentials an
 - `npm run dev` — start API and Vite development server.
 - `npm run build` — type-check the server and build the frontend.
 - `npm test` — run unit and API tests.
+- `npm run validate:live:mcp` — connect through the runtime gateway to DeepWiki and call its read-only `read_wiki_structure` tool (requires outbound network access).
 - `npm start` — run the production server after building.
 
 ## Architecture
@@ -96,4 +121,4 @@ This repository is a standalone project for the Relate by Neo4j hackathon. It is
 
 ## Status
 
-Early implementation. The graph includes local MCP discovery, read-only scheduled HTTP/SSE inspection, opt-in stdio inspection, tool-schema drift detection, heuristic capability/permission drift, historical blast-radius comparisons and separately authenticated runtime event ingestion. Execution telemetry still requires an agent-runtime adapter; capability inference does not establish exploitability, and no policy enforcement is claimed.
+The graph includes local MCP discovery, read-only scheduled HTTP/SSE inspection, opt-in stdio inspection, tool-schema drift detection, heuristic capability/permission drift, historical blast-radius comparisons, an authenticated Streamable HTTP MCP runtime gateway and a separately authenticated adapter-event endpoint. Gateway observations are limited to protocol requests and responses; they do not independently verify downstream side effects. Capability inference does not establish exploitability, and no policy enforcement is claimed.

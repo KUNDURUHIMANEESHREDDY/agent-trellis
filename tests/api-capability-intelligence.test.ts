@@ -66,13 +66,13 @@ describe("Capability intelligence API", () => {
         .send({})
         .expect(201);
       const linked = await request(app).get("/api/capabilities/intelligence").expect(200);
-      expect(linked.body.servers[0].agents.map((agent: any) => agent.id)).toContain("agent-support");
+      expect(linked.body.servers.find((item: any) => item.id === server!.id)?.agents.map((agent: any) => agent.id)).toContain("agent-support");
 
       await request(app)
         .delete("/api/agents/agent-support/mcp-servers/" + server!.id)
         .expect(200);
       const unlinked = await request(app).get("/api/capabilities/intelligence").expect(200);
-      expect(unlinked.body.servers[0].agents).toHaveLength(0);
+      expect(unlinked.body.servers.find((item: any) => item.id === server!.id)?.agents).toHaveLength(0);
 
       await request(app)
         .post("/api/agents/agent-missing/mcp-servers/" + server!.id)

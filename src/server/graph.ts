@@ -5,7 +5,7 @@ import { Database, type Connection } from "@relate/relate";
 import type { DiscoveredMcpServer, MCPDiscoveryResult } from "./discovery";
 import type { MCPInspectionOutcome } from "./mcp-inspector";
 import { aggregateExposure, inferToolCapabilities, INFERENCE_VERSION, CAPABILITY_DEFINITIONS, type ToolCapabilityAnalysis } from "./capability-intelligence";
-import { compareToolInventory, fingerprintToolInventory, fingerprintToolSnapshot, isHighImpactEffect, validateRuntimeEvent, type McpToolSnapshot } from "./runtime-security";
+import { compareToolInventory, fingerprintToolInventory, fingerprintToolSnapshot, isHighImpactEffect, validateRuntimeEvent, type McpToolSnapshot, type RuntimeEvidenceSource } from "./runtime-security";
 
 export type GraphNode = { id: string; labels: string[]; properties: Record<string, unknown> };
 export type GraphEdge = { source: string; target: string; type: string; properties: Record<string, unknown> };
@@ -900,7 +900,7 @@ export class AgentGraph {
     return row?.monitor ?? null;
   }
 
-  recordRuntimeEvent(input: unknown) {
+  recordRuntimeEvent(input: unknown, sourceKind: RuntimeEvidenceSource = "adapter_reported") {
     const validation = validateRuntimeEvent(input);
     if (!validation.ok) return { ok: false as const, status: 400, error: validation.error };
     const event = validation.event;
@@ -952,7 +952,10 @@ export class AgentGraph {
       title: event.eventType + ": " + event.toolName,
       result,
       severity,
-      source: "Authenticated runtime adapter",
+      sourceKind,
+      source: sourceKind === "gateway_observed"
+        ? "AgentTrellis MCP runtime gateway (protocol-hop observation)"
+        : "Authenticated runtime adapter",
       age: "just now",
       eventId: event.eventId,
       executionId: event.executionId,
@@ -1021,6 +1024,13 @@ export class AgentGraph {
       ).rows[0] as { total?: number } | undefined;
       return Number(row?.total ?? 0);
     };
+    const countBySource = (sourceKind: RuntimeEvidenceSource) => Number((this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT', sourceKind: $sourceKind}) RETURN count(e) AS total",
+      { sourceKind }
+    ).rows[0] as { total?: number } | undefined)?.total ?? 0);
+    const countLegacyAdapterEvents = () => Number((this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT'}) WHERE e.sourceKind IS NULL RETURN count(e) AS total"
+    ).rows[0] as { total?: number } | undefined)?.total ?? 0);
     const highSeveritySideEffects = this.query(
       "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT', eventType: 'SIDE_EFFECT_OBSERVED', severity: 'HIGH'}) RETURN count(e) AS total"
     ).rows[0] as { total?: number } | undefined;
@@ -1032,7 +1042,13 @@ export class AgentGraph {
         callsFailed: count("MCP_RUNTIME_EVENT", "CALL_FAILED"),
         policyDenials: count("MCP_RUNTIME_EVENT", "POLICY_DENIED"),
         sideEffects: count("MCP_RUNTIME_EVENT", "SIDE_EFFECT_OBSERVED"),
-        highSeveritySideEffects: Number(highSeveritySideEffects?.total ?? 0)
+        highSeveritySideEffects: Number(highSeveritySideEffects?.total ?? 0),
+        gatewayObservedEvents: countBySource("gateway_observed"),
+        adapterReportedEvents: countBySource("adapter_reported") + countLegacyAdapterEvents()
+      },
+      provenance: {
+        gatewayObserved: countBySource("gateway_observed"),
+        adapterReported: countBySource("adapter_reported") + countLegacyAdapterEvents()
       },
       events: eventRows.map((row) => row.event),
       drift: {

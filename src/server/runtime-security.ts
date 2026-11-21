@@ -39,6 +39,7 @@ export const RUNTIME_EFFECTS = [
 
 export type RuntimeEventType = typeof RUNTIME_EVENT_TYPES[number];
 export type RuntimeEffect = typeof RUNTIME_EFFECTS[number];
+export type RuntimeEvidenceSource = "gateway_observed" | "adapter_reported";
 
 export interface NormalizedRuntimeEvent {
   eventId: string;

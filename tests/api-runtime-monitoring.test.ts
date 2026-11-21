@@ -92,6 +92,8 @@ describe("runtime telemetry API", () => {
       expect(monitoring.body.summary.totalEvents).toBe(1);
       expect(monitoring.body.summary.sideEffects).toBe(1);
       expect(monitoring.body.summary.highSeveritySideEffects).toBe(1);
+      expect(monitoring.body.provenance).toEqual({ gatewayObserved: 0, adapterReported: 1 });
+      expect(monitoring.body.events[0].sourceKind).toBe("adapter_reported");
       expect(monitoring.body.events[0].toolName).toBe("write_file");
       expect(monitoring.body.events[0]).not.toHaveProperty("arguments");
       expect(monitoring.body.events[0]).not.toHaveProperty("input");

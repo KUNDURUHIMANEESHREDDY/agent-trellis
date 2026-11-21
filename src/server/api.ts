@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { handleMcpRuntimeGateway, runtimeTokenMatches } from "./mcp-runtime-gateway";
 import { AgentGraph } from "./graph";
 import { discoverMcpConfigurations, resolveMcpServerConfig } from "./discovery";
 import { inspectMcpServer } from "./mcp-inspector";
@@ -56,14 +56,27 @@ export function createApp(graph: AgentGraph, monitor?: MCPContinuousMonitor) {
       return res.status(503).json({ error: "Runtime telemetry ingestion is disabled. Configure AGENT_TRELLIS_RUNTIME_TOKEN and restart the API." });
     }
     const suppliedToken = req.header("x-agent-trellis-token") ?? "";
-    const expectedBytes = Buffer.from(configuredToken);
-    const suppliedBytes = Buffer.from(suppliedToken);
-    const authorized = expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
-    if (!authorized) return res.status(401).json({ error: "Invalid runtime telemetry token." });
+    if (!runtimeTokenMatches(suppliedToken, configuredToken)) {
+      return res.status(401).json({ error: "Invalid runtime telemetry token." });
+    }
 
-    const result = graph.recordRuntimeEvent(req.body);
+    const result = graph.recordRuntimeEvent(req.body, "adapter_reported");
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     return res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.all("/api/runtime/mcp/:serverId", async (req, res) => {
+    try {
+      const configuredRoots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
+        .split(path.delimiter).map((value) => value.trim()).filter(Boolean);
+      await handleMcpRuntimeGateway(req, res, graph, {
+        resolve: (serverId) => resolveMcpServerConfig(serverId, {
+          workspaceRoots: [process.cwd(), ...configuredRoots]
+        })
+      });
+    } catch {
+      if (!res.headersSent) res.status(502).json({ error: "The MCP runtime gateway could not complete this request." });
+      else res.destroy();
+    }
   });
   app.get("/api/capabilities/intelligence", (_req, res) => res.json(graph.getCapabilityIntelligence()));
   app.post("/api/capabilities/analyze", (req, res) => {

@@ -10,7 +10,8 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx src/server/index.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate:live:mcp": "tsx scripts/validate-live-mcp-gateway.ts"
   },
   "keywords": [
     "neo4j",
