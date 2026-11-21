@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
-import { handleMcpRuntimeGateway, runtimeTokenMatches } from "./mcp-runtime-gateway";
+import { handleLegacySseMessageGateway, handleMcpRuntimeGateway, runtimeTokenMatches } from "./mcp-runtime-gateway";
 import { AgentGraph } from "./graph";
 import { discoverMcpConfigurations, resolveMcpServerConfig } from "./discovery";
 import { inspectMcpServer } from "./mcp-inspector";
@@ -63,6 +63,40 @@ export function createApp(graph: AgentGraph, monitor?: MCPContinuousMonitor) {
     const result = graph.recordRuntimeEvent(req.body, "adapter_reported");
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     return res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.post("/api/runtime/gateway-events", (req, res) => {
+    const configuredToken = process.env.AGENT_TRELLIS_RUNTIME_GATEWAY_TOKEN;
+    if (!configuredToken) return res.status(503).json({ error: "The stdio runtime gateway event channel is disabled." });
+    if (!runtimeTokenMatches(req.header("x-agent-trellis-gateway-token") ?? "", configuredToken)) {
+      return res.status(401).json({ error: "Invalid stdio runtime gateway token." });
+    }
+    const result = graph.recordRuntimeEvent(req.body, "gateway_observed");
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.post("/api/runtime/independent-observations", (req, res) => {
+    const configuredToken = process.env.AGENT_TRELLIS_RUNTIME_OBSERVER_TOKEN;
+    if (!configuredToken) return res.status(503).json({ error: "Independent side-effect observation is not configured." });
+    if (!runtimeTokenMatches(req.header("x-agent-trellis-observer-token") ?? "", configuredToken)) {
+      return res.status(401).json({ error: "Invalid independent-observer token." });
+    }
+    const result = graph.recordIndependentSideEffectObservation(req.body);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.all("/api/runtime/mcp/:serverId/messages/:sessionId", async (req, res) => {
+    try {
+      const configuredRoots = (process.env.AGENT_TRELLIS_WORKSPACES || "")
+        .split(path.delimiter).map((value) => value.trim()).filter(Boolean);
+      await handleLegacySseMessageGateway(req, res, graph, {
+        resolve: (serverId) => resolveMcpServerConfig(serverId, {
+          workspaceRoots: [process.cwd(), ...configuredRoots]
+        })
+      });
+    } catch {
+      if (!res.headersSent) res.status(502).json({ error: "The legacy MCP message gateway could not complete this request." });
+      else res.destroy();
+    }
   });
   app.all("/api/runtime/mcp/:serverId", async (req, res) => {
     try {

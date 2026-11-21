@@ -49,7 +49,7 @@ Discovery supports Claude Desktop, Claude Code user/local configuration, Cursor 
 
 ### Runtime telemetry and schema drift
 
-Set AGENT_TRELLIS_RUNTIME_TOKEN to a unique random secret in the API environment and restart AgentTrellis. A trusted execution adapter can then send normalized events to POST /api/runtime/events with the x-agent-trellis-token header. Use a stable, unique eventId per event and include executionId, serverId, toolName, eventType and an optional ISO timestamp/duration. Supported event types are CALL_STARTED, CALL_SUCCEEDED, CALL_FAILED, POLICY_DENIED and SIDE_EFFECT_OBSERVED. Side-effect events must include a normalized effect such as filesystem_write or database_write.
+Set AGENT_TRELLIS_RUNTIME_TOKEN to a unique random secret in the API environment and restart AgentTrellis. A trusted execution adapter can then send normalized events to POST /api/runtime/events with the x-agent-trellis-token header. Use a stable, unique eventId per event and include executionId, serverId, toolName, eventType and an optional ISO timestamp/duration. Supported event types are CALL_STARTED, CALL_SUCCEEDED, CALL_FAILED, CALL_OUTCOME_UNKNOWN, POLICY_DENIED and SIDE_EFFECT_OBSERVED. Side-effect events must include a normalized effect such as filesystem_write or database_write.
 
 The ingestion validator deliberately rejects raw arguments, results, credentials, headers and environment values. It stores only normalized metadata and hashes for idempotency; it does not independently inspect tool inputs or outputs. POST /api/runtime/events is **adapter-reported** telemetry: the API assigns this provenance itself, even if a client adds a `sourceKind` field to its payload.
 
@@ -69,13 +69,58 @@ For direct observation of MCP tool-call traffic, route the agent's remote MCP co
 }
 ```
 
-Discover and inspect the upstream server first so its tool inventory is linked to the graph. The gateway resolves the upstream URL and configured headers from the discovered local MCP configuration; clients cannot submit arbitrary upstream URLs. It consumes the AgentTrellis token locally and does not forward it to the upstream. Use the discovered server ID shown by MCP discovery. The gateway currently proxies Streamable HTTP configurations only; legacy SSE and stdio execution are not intercepted.
+Discover and inspect the upstream server first so its tool inventory is linked to the graph. The gateway resolves upstream URLs and configured headers from discovered local MCP configuration; clients cannot submit arbitrary upstream URLs. It consumes the AgentTrellis token locally and does not forward it upstream. Use the discovered server ID shown by MCP discovery.
 
-For each correlated JSON-RPC `tools/call`, the gateway records `CALL_STARTED` and, when it can parse a matching response, `CALL_SUCCEEDED` or `CALL_FAILED`. Response classification is limited to HTTP failures or JSON-RPC/tool-result errors. Large (>256 KiB), streaming or uncorrelated responses may retain only the start event. Tool arguments, result bodies and configured credentials are never written to the graph. Gateway evidence is labelled **gateway-observed** because AgentTrellis sees the request and response at its own proxy boundary; this does not prove that a remote tool performed a filesystem, database, network or other real-world side effect.
+The route `/api/runtime/mcp/:serverId` supports both **Streamable HTTP** and **legacy SSE**. For legacy SSE, AgentTrellis maintains the session, rewrites the upstream `endpoint` event to a local message URL and relays message POSTs to the same-origin endpoint announced by the server. The HTTP/SSE gateway requires `AGENT_TRELLIS_RUNTIME_TOKEN`.
 
-Adapters may still submit normalized `SIDE_EFFECT_OBSERVED` events, but these remain **adapter-reported** claims, not independent observations. The gateway does not infer side effects from tool names, descriptions or schemas. GET /api/runtime/monitoring exposes recent runtime events and separate counts for gateway-observed and adapter-reported records. Runtime telemetry and gateway routing are disabled when no token is configured.
+### Local stdio MCP gateway
 
-Evidence provenance is intentionally split: **gateway-observed** = MCP request/response visible at the AgentTrellis proxy; **adapter-reported** = metadata asserted by an authenticated execution adapter; **heuristic** = schema/description-derived capability and permission inference. Heuristic capability drift and graph-derived blast radius do not prove execution, enforcement, exploitability or side effects.
+For a local stdio MCP server, run it through the dedicated sidecar:
+
+```bash
+AGENT_TRELLIS_RUNTIME_STDIO=true npm run runtime:stdio -- --server-id <discovered-server-id>
+```
+
+The original stdio server definition must be present in an AgentTrellis-scanned configuration under the working directory or `AGENT_TRELLIS_WORKSPACES`. Register the AgentTrellis sidecar—not the original command—as the MCP server in the agent host. This avoids leaving an unmonitored direct connection available to that agent. The sidecar launches the configured process with its configured environment and relays newline-delimited JSON-RPC. Its event channel uses the separate `AGENT_TRELLIS_RUNTIME_GATEWAY_TOKEN`; the token is not passed to the upstream MCP process. stdio interception is opt-in and disabled unless `AGENT_TRELLIS_RUNTIME_STDIO=true`.
+
+Example agent-host stdio registration (replace the path and discovered server ID):
+
+```json
+{
+  "mcpServers": {
+    "monitored-local": {
+      "command": "node",
+      "args": [
+        "--import", "tsx",
+        "/absolute/path/to/agent-trellis/src/server/mcp-stdio-gateway.ts",
+        "--server-id", "<discovered-server-id>"
+      ],
+      "env": {
+        "AGENT_TRELLIS_RUNTIME_STDIO": "true",
+        "AGENT_TRELLIS_RUNTIME_GATEWAY_TOKEN": "<stdio-gateway-token>",
+        "AGENT_TRELLIS_API_URL": "http://127.0.0.1:8787",
+        "AGENT_TRELLIS_WORKSPACES": "/absolute/path/to/upstream-config-root"
+      }
+    }
+  }
+}
+```
+
+### Runtime outcomes and evidence
+
+For every gateway-observed `tools/call`, AgentTrellis records `CALL_STARTED` before forwarding the request, then exactly one terminal `CALL_SUCCEEDED`, `CALL_FAILED` or `CALL_OUTCOME_UNKNOWN` when the outcome is known or cannot be established. Tool calls have a 60-second gateway timeout. A terminal event is bound to a prior start with the same server, execution ID, tool and provenance; duplicate terminal events are rejected, and the original tool ID is retained if the inspected catalogue changes while the call is in flight.
+
+Responses continue to be streamed to the client without persisting their contents. Responses larger than 256 KiB, uncorrelated JSON-RPC responses, malformed or unparseable streams, process exits, timeouts and disconnects receive an explicit `CALL_OUTCOME_UNKNOWN` terminal event with a reason code. The Streamable HTTP classifier also parses correlated JSON-RPC messages inside valid SSE data events. Gateway event records contain metadata only: no tool arguments, result bodies, paths or configured credentials.
+
+### Independent host side-effect observation
+
+The stdio sidecar can optionally use operating-system filesystem notifications to observe changes under the configured stdio server working directory and additional `AGENT_TRELLIS_RUNTIME_WATCH_PATHS` roots. Enable it with `AGENT_TRELLIS_RUNTIME_OBSERVE_FILESYSTEM=true` and a separate `AGENT_TRELLIS_RUNTIME_OBSERVER_TOKEN`. The watcher records only the normalized `filesystem_write` category, event count, timestamp and attribution confidence; it never records filenames or file contents. Its observations are authenticated separately at `POST /api/runtime/independent-observations`.
+
+Filesystem notifications are an independent observation that a watched host path changed. When exactly one call was active during the observation window, the event may be correlated to that call; overlapping or mixed timing is marked ambiguous and is not attributed to a tool. This is temporal correlation, not proof that the tool caused the change. The watcher sees only configured local filesystem paths around the locally launched stdio process. It does **not** independently observe remote MCP server filesystem changes, databases, cloud APIs, email, payments or other remote side effects. Those require audit/event feeds from the relevant external systems. Authenticated adapters can still submit `SIDE_EFFECT_OBSERVED`, but those signals remain **adapter-reported**, not independent observation.
+
+Evidence provenance is deliberately split: **gateway-observed** = MCP protocol requests and correlated responses visible at the AgentTrellis gateway; **independent-observer** = operating-system filesystem notifications from configured local watch roots; **adapter-reported** = metadata asserted by an authenticated execution adapter; **heuristic** = schema/description-derived capability and permission inference. Capability inference and graph-derived blast radius remain heuristic/graph-derived assessments. They do not prove actual use, exploitability or enforced permissions. AgentTrellis does not claim policy enforcement.
+
+GET /api/runtime/monitoring exposes these histories and separate provenance counts. Runtime HTTP/SSE routing requires `AGENT_TRELLIS_RUNTIME_TOKEN`; the stdio sidecar and filesystem observer require their separate gateway and observer tokens.
 
 Continuous MCP monitoring runs in the API process. By default it performs a scan at startup and every five minutes after that. Set AGENT_TRELLIS_MONITOR_INTERVAL_MS to another interval in milliseconds; set it to 0 to disable automatic scheduling. HTTP and SSE MCP servers are reinspected using read-only protocol metadata methods. Local stdio servers are skipped by default. Set AGENT_TRELLIS_MONITOR_STDIO=true only when you explicitly accept automatic local process launches; manual inspection still requires its existing confirmation flow.
 
@@ -97,6 +142,7 @@ HTTP and SSE endpoints use the configured headers only in memory. Credentials an
 - `npm run build` — type-check the server and build the frontend.
 - `npm test` — run unit and API tests.
 - `npm run validate:live:mcp` — connect through the runtime gateway to DeepWiki and call its read-only `read_wiki_structure` tool (requires outbound network access).
+- `AGENT_TRELLIS_RUNTIME_STDIO=true npm run runtime:stdio -- --server-id <id>` — launch a discovered stdio MCP server through the telemetry sidecar (requires the separate gateway token).
 - `npm start` — run the production server after building.
 
 ## Architecture
@@ -121,4 +167,4 @@ This repository is a standalone project for the Relate by Neo4j hackathon. It is
 
 ## Status
 
-The graph includes local MCP discovery, read-only scheduled HTTP/SSE inspection, opt-in stdio inspection, tool-schema drift detection, heuristic capability/permission drift, historical blast-radius comparisons, an authenticated Streamable HTTP MCP runtime gateway and a separately authenticated adapter-event endpoint. Gateway observations are limited to protocol requests and responses; they do not independently verify downstream side effects. Capability inference does not establish exploitability, and no policy enforcement is claimed.
+The graph includes local MCP discovery, read-only scheduled HTTP/SSE inspection, tool-schema drift detection, heuristic capability/permission drift, historical blast-radius comparisons, authenticated Streamable HTTP and legacy SSE gateways, and an opt-in stdio MCP sidecar. Tool-call lifecycle evidence receives explicit success, failure or indeterminate terminal outcomes. A separate host filesystem watcher can independently observe changes in configured local paths around stdio processes; remote service side effects still require native audit feeds. Capability inference remains heuristic and no policy enforcement is claimed.

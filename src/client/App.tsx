@@ -9,9 +9,10 @@ type DiscoveredMcpServer = { id: string; name: string; hostName: string; hostSou
 type MCPInspectionView = { id: string; serverId: string; serverName: string; result: string; severity: string; inspectedAt: string; transport: string; protocolEra: string; protocolVersion: string; serverInfoJson?: string; instructions?: string; declaredCapabilitiesJson?: string; observedCapabilitiesJson?: string; capabilityComparisonsJson?: string; errorSummary?: string; tools: Array<Record<string, unknown>> };
 type RuntimeMonitoring = {
   telemetryConfigured: boolean;
-  provenance: { gatewayObserved: number; adapterReported: number };
+  provenance: { gatewayObserved: number; adapterReported: number; independentObserver: number };
   summary: Record<string, number>;
   events: Record<string, any>[];
+  independentObservations: { total: number; events: Record<string, any>[] };
   drift: { total: number; events: Record<string, any>[] };
   capabilityDrift: { total: number; permissionEscalations: number; events: Record<string, any>[] };
   blastRadius: { total: number; expanded: number; events: Record<string, any>[] };
@@ -43,9 +44,10 @@ function App() {
   const [capabilityIntelligence,setCapabilityIntelligence]=useState<CapabilityIntelligence>({summary:{servers:0,analyzedServers:0,tools:0,analyzedTools:0,highRiskTools:0,criticalTools:0,unassociatedServers:0,capabilities:0},capabilities:[],servers:[]});
   const [runtimeMonitoring,setRuntimeMonitoring]=useState<RuntimeMonitoring>({
     telemetryConfigured:false,
-    provenance:{gatewayObserved:0,adapterReported:0},
-    summary:{totalEvents:0,callsStarted:0,callsSucceeded:0,callsFailed:0,policyDenials:0,sideEffects:0,highSeveritySideEffects:0,gatewayObservedEvents:0,adapterReportedEvents:0},
+    provenance:{gatewayObserved:0,adapterReported:0,independentObserver:0},
+    summary:{totalEvents:0,callsStarted:0,callsSucceeded:0,callsFailed:0,callsOutcomeUnknown:0,policyDenials:0,sideEffects:0,highSeveritySideEffects:0,gatewayObservedEvents:0,adapterReportedEvents:0,independentSideEffectObservations:0},
     events:[],
+    independentObservations:{total:0,events:[]},
     drift:{total:0,events:[]},
     capabilityDrift:{total:0,permissionEscalations:0,events:[]},
     blastRadius:{total:0,expanded:0,events:[]},
@@ -150,11 +152,13 @@ function App() {
             <div className="capability-summary-stats">
               <div><b>{runtimeMonitoring.summary.totalEvents??0}</b><small>RUNTIME EVENTS</small></div>
               <div><b>{runtimeMonitoring.summary.callsFailed??0}</b><small>FAILED CALLS</small></div>
+              <div><b>{runtimeMonitoring.summary.callsOutcomeUnknown??0}</b><small>UNKNOWN OUTCOMES</small></div>
               <div><b>{runtimeMonitoring.summary.policyDenials??0}</b><small>POLICY DENIALS</small></div>
-              <div><b>{runtimeMonitoring.summary.sideEffects??0}</b><small>REPORTED SIDE EFFECTS</small></div>
+              <div><b>{runtimeMonitoring.summary.sideEffects??0}</b><small>ADAPTER-REPORTED EFFECTS</small></div>
+              <div><b>{runtimeMonitoring.independentObservations.total??0}</b><small>INDEPENDENT HOST OBSERVATIONS</small></div>
             </div>
           </div>
-          <div className="capability-safety"><ShieldCheck size={16}/><span>{runtimeMonitoring.monitorStatus.enabled?"Automatic monitor is enabled every "+Math.round(runtimeMonitoring.monitorStatus.intervalMs/60000)+" minute(s).":"Automatic monitor scheduling is disabled."} HTTP and SSE servers are reinspected automatically. Local stdio servers are {runtimeMonitoring.monitorStatus.includeStdio?"enabled by explicit configuration.":"skipped unless AGENT_TRELLIS_MONITOR_STDIO=true is configured."} This process compares exposed tool metadata; it does not invoke MCP tools. {runtimeMonitoring.telemetryConfigured?"Runtime event ingestion is enabled.":"Runtime event ingestion is disabled until AGENT_TRELLIS_RUNTIME_TOKEN is configured."} Gateway events observe MCP tool-call requests and correlated responses at the proxy, not remote side effects. Adapter-reported effect events are claims from the adapter. Capability inferences remain heuristic.</span></div>
+          <div className="capability-safety"><ShieldCheck size={16}/><span>{runtimeMonitoring.monitorStatus.enabled?"Automatic monitor is enabled every "+Math.round(runtimeMonitoring.monitorStatus.intervalMs/60000)+" minute(s).":"Automatic monitor scheduling is disabled."} HTTP and SSE servers are reinspected automatically. Local stdio servers are {runtimeMonitoring.monitorStatus.includeStdio?"enabled by explicit configuration.":"skipped unless AGENT_TRELLIS_MONITOR_STDIO=true is configured."} This process compares exposed tool metadata; it does not invoke MCP tools. Runtime gateway coverage includes Streamable HTTP and legacy SSE; local stdio requires the separate opt-in sidecar. {runtimeMonitoring.telemetryConfigured?"HTTP/SSE runtime gateway is enabled.":"HTTP/SSE runtime gateway is disabled until AGENT_TRELLIS_RUNTIME_TOKEN is configured."} Independent host observation is limited to opt-in filesystem watching around local stdio servers; remote database, cloud, email and payment effects require those systems' audit feeds. Adapter-reported effect events remain claims from the adapter. Capability inferences remain heuristic; no policy enforcement is claimed.</span></div>
           <div className="capability-summary-stats monitor-metrics">
             <div><b>{runtimeMonitoring.drift.total}</b><small>SCHEMA DRIFT</small></div>
             <div><b>{runtimeMonitoring.capabilityDrift.total}</b><small>CAPABILITY DRIFT</small></div>
@@ -164,13 +168,22 @@ function App() {
           <div className="monitor-run-status"><span>Last monitor run: {runtimeMonitoring.monitorRuns.latest?.completedAt?new Date(runtimeMonitoring.monitorRuns.latest.completedAt).toLocaleString():"Not run yet"}</span><span>{runtimeMonitoring.monitorStatus.running?"RUNNING":runtimeMonitoring.monitorRuns.latest?.result??"IDLE"}</span></div>
           <div className="runtime-monitoring-grid">
             <div className="runtime-monitoring-column">
-              <div className="capability-tools-head"><b>Recent runtime events</b><small>{runtimeMonitoring.events.length} shown · {runtimeMonitoring.provenance.gatewayObserved} gateway-observed / {runtimeMonitoring.provenance.adapterReported} adapter-reported</small></div>
-              {runtimeMonitoring.events.length===0?<div className="capability-empty">No runtime events yet. Route an agent’s Streamable HTTP MCP connection through /api/runtime/mcp/:serverId, or connect an execution adapter to POST /api/runtime/events.</div>:runtimeMonitoring.events.map((event:any)=><article className="runtime-event" key={event.id}>
+              <div className="capability-tools-head"><b>Recent runtime events</b><small>{runtimeMonitoring.events.length} shown · {runtimeMonitoring.provenance.gatewayObserved} gateway-observed / {runtimeMonitoring.provenance.adapterReported} adapter-reported / {runtimeMonitoring.provenance.independentObserver} independent observer</small></div>
+              {runtimeMonitoring.events.length===0?<div className="capability-empty">No runtime events yet. Route an agent's Streamable HTTP or legacy SSE MCP connection through /api/runtime/mcp/:serverId, use the opt-in stdio sidecar for local servers, or connect an execution adapter to POST /api/runtime/events.</div>:runtimeMonitoring.events.map((event:any)=><article className="runtime-event" key={event.id}>
                 <div><b>{event.toolName}</b><small>{event.serverName} · {event.eventType} · {new Date(event.observedAt).toLocaleString()}</small><small className="runtime-event-detail">{event.sourceKind==="gateway_observed"?"Gateway observed protocol traffic":"Adapter-reported telemetry"}</small></div>
                 <span className={"tool-risk "+String(event.severity??"INFO").toLowerCase()}>{event.severity}</span>
                 {event.effect&&<small className="runtime-event-detail">Adapter-reported effect: {event.effect}</small>}
                 {event.agentName&&<small className="runtime-event-detail">Agent: {event.agentName}</small>}
                 {event.durationMs!==undefined&&<small className="runtime-event-detail">Duration: {event.durationMs} ms</small>}
+              </article>)}
+            </div>
+            <div className="runtime-monitoring-column">
+              <div className="capability-tools-head"><b>Independent host side effects</b><small>{runtimeMonitoring.independentObservations.total} observation(s)</small></div>
+              {runtimeMonitoring.independentObservations.events.length===0?<div className="capability-empty">No independently observed host filesystem changes. Local stdio observation requires explicit filesystem-watch opt-in and configured watch roots.</div>:runtimeMonitoring.independentObservations.events.map((event:any)=><article className="runtime-event" key={event.id}>
+                <div><b>{event.effect}</b><small>{event.serverName} · {new Date(event.observedAt).toLocaleString()}</small></div>
+                <span className="tool-risk high">{event.eventCount} change(s)</span>
+                <small className="runtime-event-detail">Observer: {event.observer} · Correlation: {event.correlation}</small>
+                <small className="runtime-event-detail">{event.summary}</small>
               </article>)}
             </div>
             <div className="runtime-monitoring-column">

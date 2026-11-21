@@ -11,7 +11,8 @@
     "start": "tsx src/server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "validate:live:mcp": "tsx scripts/validate-live-mcp-gateway.ts"
+    "validate:live:mcp": "tsx scripts/validate-live-mcp-gateway.ts",
+    "runtime:stdio": "tsx src/server/mcp-stdio-gateway.ts"
   },
   "keywords": [
     "neo4j",

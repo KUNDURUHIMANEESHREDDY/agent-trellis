@@ -20,6 +20,7 @@ export const RUNTIME_EVENT_TYPES = [
   "CALL_STARTED",
   "CALL_SUCCEEDED",
   "CALL_FAILED",
+  "CALL_OUTCOME_UNKNOWN",
   "POLICY_DENIED",
   "SIDE_EFFECT_OBSERVED"
 ] as const;
@@ -39,7 +40,7 @@ export const RUNTIME_EFFECTS = [
 
 export type RuntimeEventType = typeof RUNTIME_EVENT_TYPES[number];
 export type RuntimeEffect = typeof RUNTIME_EFFECTS[number];
-export type RuntimeEvidenceSource = "gateway_observed" | "adapter_reported";
+export type RuntimeEvidenceSource = "gateway_observed" | "adapter_reported" | "independent_observer";
 
 export interface NormalizedRuntimeEvent {
   eventId: string;

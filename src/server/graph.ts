@@ -900,6 +900,105 @@ export class AgentGraph {
     return row?.monitor ?? null;
   }
 
+  recordIndependentSideEffectObservation(input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return { ok: false as const, status: 400, error: "An observation object is required." };
+    }
+    const value = input as Record<string, unknown>;
+    const allowed = new Set([
+      "observationId", "serverId", "effect", "observer", "observedAt",
+      "eventCount", "correlation", "executionId", "toolName"
+    ]);
+    if (Object.keys(value).some((key) => !allowed.has(key))) {
+      return { ok: false as const, status: 400, error: "Only normalized side-effect observation metadata is accepted." };
+    }
+    const observationId = typeof value.observationId === "string" ? value.observationId : "";
+    const serverId = typeof value.serverId === "string" ? value.serverId : "";
+    const effect = typeof value.effect === "string" ? value.effect : "";
+    const observer = typeof value.observer === "string" ? value.observer : "";
+    const observedAt = typeof value.observedAt === "string" ? value.observedAt : "";
+    const eventCount = value.eventCount;
+    const correlation = value.correlation;
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(observationId) ||
+        !/^[A-Za-z0-9._:-]{1,200}$/.test(serverId) ||
+        !["filesystem_write"].includes(effect) ||
+        observer !== "host-filesystem-watcher" ||
+        !Number.isInteger(eventCount) || Number(eventCount) < 1 || Number(eventCount) > 100000 ||
+        !["single_active_call", "multiple_active_calls", "no_active_call", "ambiguous"].includes(String(correlation)) ||
+        !/^\d{4}-\d{2}-\d{2}T/.test(observedAt) || !Number.isFinite(new Date(observedAt).getTime())) {
+      return { ok: false as const, status: 400, error: "The independent side-effect observation is invalid." };
+    }
+    const serverRow = this.query(
+      "MATCH (s:MCPServer {id: $id, discovered: true}) RETURN properties(s) AS server",
+      { id: serverId }
+    ).rows[0] as { server: Record<string, unknown> } | undefined;
+    if (!serverRow) return { ok: false as const, status: 404, error: "Discovered MCP server not found." };
+
+    const executionId = typeof value.executionId === "string" ? value.executionId : undefined;
+    const toolName = typeof value.toolName === "string" ? value.toolName : undefined;
+    if ((correlation === "single_active_call") !== Boolean(executionId && toolName) ||
+        (executionId !== undefined && !/^[A-Za-z0-9._:-]{1,128}$/.test(executionId)) ||
+        (toolName !== undefined && (toolName.length < 1 || toolName.length > 200 || /[\u0000-\u001f]/.test(toolName)))) {
+      return { ok: false as const, status: 400, error: "A single-call correlation must include a valid executionId and toolName; ambiguous observations must not be attributed." };
+    }
+    let toolId: string | undefined;
+    if (executionId && toolName) {
+      const toolRow = this.query(
+        "MATCH (s:MCPServer {id: $serverId})-[:EXPOSES]->(t:Tool {mcpDiscovered: true, name: $toolName}) RETURN t.id AS id",
+        { serverId, toolName }
+      ).rows[0] as { id?: string } | undefined;
+      if (!toolRow?.id) return { ok: false as const, status: 404, error: "The correlated tool is not present in the latest inspected inventory." };
+      toolId = toolRow.id;
+    }
+
+    const evidenceId = "evidence-independent-effect-" + createHash("sha256")
+      .update(serverId + "\\0" + observationId).digest("hex").slice(0, 24);
+    const existing = this.query(
+      "MATCH (e:Evidence {id: $id, kind: 'MCP_EXTERNAL_EFFECT_OBSERVATION'}) RETURN properties(e) AS event",
+      { id: evidenceId }
+    ).rows[0] as { event: Record<string, unknown> } | undefined;
+    if (existing) return { ok: true as const, duplicate: true, evidenceId };
+
+    const properties = {
+      id: evidenceId,
+      kind: "MCP_EXTERNAL_EFFECT_OBSERVATION",
+      eventId: observationId,
+      eventType: "SIDE_EFFECT_OBSERVED",
+      title: "Independently observed filesystem change",
+      result: "OBSERVED",
+      severity: "HIGH",
+      sourceKind: "independent_observer",
+      source: "Host operating-system filesystem watcher",
+      assessmentBasis: "OS filesystem change notification",
+      observer,
+      effect,
+      eventCount: Number(eventCount),
+      correlation,
+      observedAt: new Date(observedAt).toISOString(),
+      receivedAt: new Date().toISOString(),
+      serverId,
+      serverName: String(serverRow.server.name ?? ""),
+      ...(executionId ? { executionId, correlatedExecutionId: executionId } : {}),
+      ...(toolName ? { toolName, toolId } : {}),
+      summary: correlation === "single_active_call"
+        ? "A filesystem change was independently observed while exactly one MCP tool call was in flight. Timing is correlation, not proof of causation."
+        : "A filesystem change was independently observed in a configured watch path, but it could not be attributed to one MCP tool call."
+    };
+    this.query("CREATE (e:Evidence {id: $id}) SET e += $props", { id: evidenceId, props: properties });
+    this.query(
+      "MATCH (e:Evidence {id: $evidenceId}), (s:MCPServer {id: $serverId}) MERGE (e)-[:OBSERVED_ON]->(s)",
+      { evidenceId, serverId }
+    );
+    if (toolId) {
+      this.query(
+        "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:OBSERVES]->(t)",
+        { evidenceId, toolId }
+      );
+    }
+    this.checkpoint();
+    return { ok: true as const, duplicate: false, evidenceId };
+  }
+
   recordRuntimeEvent(input: unknown, sourceKind: RuntimeEvidenceSource = "adapter_reported") {
     const validation = validateRuntimeEvent(input);
     if (!validation.ok) return { ok: false as const, status: 400, error: validation.error };
@@ -910,24 +1009,8 @@ export class AgentGraph {
     ).rows[0] as { server: Record<string, unknown> } | undefined;
     if (!serverRow) return { ok: false as const, status: 404, error: "Discovered MCP server not found." };
 
-    const toolRow = this.query(
-      "MATCH (s:MCPServer {id: $serverId})-[:EXPOSES]->(t:Tool {mcpDiscovered: true, name: $toolName}) RETURN properties(t) AS tool",
-      { serverId: event.serverId, toolName: event.toolName }
-    ).rows[0] as { tool: Record<string, unknown> } | undefined;
-    if (!toolRow) return { ok: false as const, status: 404, error: "Tool is not present in the latest inspected inventory." };
-
-    let agentName: string | undefined;
-    if (event.agentId) {
-      const agentRow = this.query(
-        "MATCH (a:Agent {id: $id}) RETURN a.name AS name",
-        { id: event.agentId }
-      ).rows[0] as { name?: string } | undefined;
-      if (!agentRow) return { ok: false as const, status: 404, error: "Agent not found." };
-      agentName = agentRow.name;
-    }
-
     const evidenceId = "evidence-runtime-" + createHash("sha256")
-      .update(event.serverId + "\0" + event.eventId)
+      .update(event.serverId + "\\0" + event.eventId)
       .digest("hex").slice(0, 24);
     const eventPayloadHash = createHash("sha256").update(JSON.stringify(event)).digest("hex");
     const existing = this.query(
@@ -941,11 +1024,45 @@ export class AgentGraph {
       return { ok: true as const, duplicate: true, evidenceId, eventType: event.eventType };
     }
 
+    const terminal = ["CALL_SUCCEEDED", "CALL_FAILED", "CALL_OUTCOME_UNKNOWN"].includes(event.eventType);
+    const startedRow = terminal ? this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT', serverId: $serverId, executionId: $executionId, sourceKind: $sourceKind, eventType: 'CALL_STARTED'}) RETURN properties(e) AS event ORDER BY e.observedAt DESC LIMIT 1",
+      { serverId: event.serverId, executionId: event.executionId, sourceKind }
+    ).rows[0] as { event: Record<string, unknown> } | undefined : undefined;
+    if (terminal && (!startedRow || startedRow.event.toolName !== event.toolName)) {
+      return { ok: false as const, status: 409, error: "A terminal runtime event must match a previously observed CALL_STARTED event from the same source and tool." };
+    }
+    const priorTerminal = terminal ? this.query(
+      "MATCH (e:Evidence {kind: 'MCP_RUNTIME_EVENT', serverId: $serverId, executionId: $executionId, sourceKind: $sourceKind}) WHERE e.eventType = 'CALL_SUCCEEDED' OR e.eventType = 'CALL_FAILED' OR e.eventType = 'CALL_OUTCOME_UNKNOWN' RETURN e.id AS id LIMIT 1",
+      { serverId: event.serverId, executionId: event.executionId, sourceKind }
+    ).rows[0] : undefined;
+    if (priorTerminal) return { ok: false as const, status: 409, error: "This execution already has a terminal runtime event." };
+
+    const toolRow = this.query(
+      "MATCH (s:MCPServer {id: $serverId})-[:EXPOSES]->(t:Tool {mcpDiscovered: true, name: $toolName}) RETURN properties(t) AS tool",
+      { serverId: event.serverId, toolName: event.toolName }
+    ).rows[0] as { tool: Record<string, unknown> } | undefined;
+    const toolId = toolRow ? String(toolRow.tool.id ?? "") :
+      (typeof startedRow?.event.toolId === "string" ? startedRow.event.toolId : "");
+    if (!toolId) return { ok: false as const, status: 404, error: "Tool is not present in the latest inspected inventory or its recorded start event." };
+
+    let agentName: string | undefined;
+    if (event.agentId) {
+      const agentRow = this.query(
+        "MATCH (a:Agent {id: $id}) RETURN a.name AS name",
+        { id: event.agentId }
+      ).rows[0] as { name?: string } | undefined;
+      if (!agentRow) return { ok: false as const, status: 404, error: "Agent not found." };
+      agentName = agentRow.name;
+    }
+
     const highImpact = isHighImpactEffect(event.effect);
     const severity = event.eventType === "SIDE_EFFECT_OBSERVED"
       ? (highImpact ? "HIGH" : "MEDIUM")
-      : event.eventType === "CALL_FAILED" ? "LOW" : "INFO";
-    const result = event.eventType === "POLICY_DENIED" ? "PASS" : "OBSERVED";
+      : event.eventType === "CALL_FAILED" ? "LOW"
+      : event.eventType === "CALL_OUTCOME_UNKNOWN" ? "MEDIUM" : "INFO";
+    const result = event.eventType === "POLICY_DENIED" ? "PASS"
+      : event.eventType === "CALL_OUTCOME_UNKNOWN" ? "INDETERMINATE" : "OBSERVED";
     const eventProperties = {
       id: evidenceId,
       kind: "MCP_RUNTIME_EVENT",
@@ -955,7 +1072,9 @@ export class AgentGraph {
       sourceKind,
       source: sourceKind === "gateway_observed"
         ? "AgentTrellis MCP runtime gateway (protocol-hop observation)"
-        : "Authenticated runtime adapter",
+        : sourceKind === "independent_observer"
+          ? "Host operating-system observer"
+          : "Authenticated runtime adapter",
       age: "just now",
       eventId: event.eventId,
       executionId: event.executionId,
@@ -964,7 +1083,7 @@ export class AgentGraph {
       receivedAt: new Date().toISOString(),
       serverId: event.serverId,
       serverName: String(serverRow.server.name ?? ""),
-      toolId: String(toolRow.tool.id ?? ""),
+      toolId,
       toolName: event.toolName,
       ...(event.agentId ? { agentId: event.agentId, agentName: agentName ?? "" } : {}),
       ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
@@ -983,7 +1102,7 @@ export class AgentGraph {
     );
     this.query(
       "MATCH (e:Evidence {id: $evidenceId}), (t:Tool {id: $toolId}) MERGE (e)-[:OBSERVES]->(t)",
-      { evidenceId, toolId: String(toolRow.tool.id ?? "") }
+      { evidenceId, toolId }
     );
     if (event.agentId) {
       this.query(
@@ -1017,6 +1136,10 @@ export class AgentGraph {
       "MATCH (e:Evidence {kind: 'MCP_MONITOR_RUN'}) RETURN properties(e) AS event ORDER BY e.completedAt DESC LIMIT $limit",
       { limit: boundedLimit }
     ).rows as Array<{ event: Record<string, unknown> }>;
+    const independentObservationRows = this.query(
+      "MATCH (e:Evidence {kind: 'MCP_EXTERNAL_EFFECT_OBSERVATION'}) RETURN properties(e) AS event ORDER BY e.observedAt DESC LIMIT $limit",
+      { limit: boundedLimit }
+    ).rows as Array<{ event: Record<string, unknown> }>;
     const count = (kind: string, eventType?: string) => {
       const row = this.query(
         "MATCH (e:Evidence {kind: $kind" + (eventType ? ", eventType: $eventType" : "") + "}) RETURN count(e) AS total",
@@ -1040,15 +1163,23 @@ export class AgentGraph {
         callsStarted: count("MCP_RUNTIME_EVENT", "CALL_STARTED"),
         callsSucceeded: count("MCP_RUNTIME_EVENT", "CALL_SUCCEEDED"),
         callsFailed: count("MCP_RUNTIME_EVENT", "CALL_FAILED"),
+        callsOutcomeUnknown: count("MCP_RUNTIME_EVENT", "CALL_OUTCOME_UNKNOWN"),
         policyDenials: count("MCP_RUNTIME_EVENT", "POLICY_DENIED"),
         sideEffects: count("MCP_RUNTIME_EVENT", "SIDE_EFFECT_OBSERVED"),
         highSeveritySideEffects: Number(highSeveritySideEffects?.total ?? 0),
         gatewayObservedEvents: countBySource("gateway_observed"),
-        adapterReportedEvents: countBySource("adapter_reported") + countLegacyAdapterEvents()
+        adapterReportedEvents: countBySource("adapter_reported") + countLegacyAdapterEvents(),
+        independentRuntimeEvents: countBySource("independent_observer"),
+        independentSideEffectObservations: Number((this.query("MATCH (e:Evidence {kind: 'MCP_EXTERNAL_EFFECT_OBSERVATION'}) RETURN count(e) AS total").rows[0] as { total?: number } | undefined)?.total ?? 0)
       },
       provenance: {
         gatewayObserved: countBySource("gateway_observed"),
-        adapterReported: countBySource("adapter_reported") + countLegacyAdapterEvents()
+        adapterReported: countBySource("adapter_reported") + countLegacyAdapterEvents(),
+        independentObserver: countBySource("independent_observer") + Number((this.query("MATCH (e:Evidence {kind: 'MCP_EXTERNAL_EFFECT_OBSERVATION'}) RETURN count(e) AS total").rows[0] as { total?: number } | undefined)?.total ?? 0)
+      },
+      independentObservations: {
+        total: Number((this.query("MATCH (e:Evidence {kind: 'MCP_EXTERNAL_EFFECT_OBSERVATION'}) RETURN count(e) AS total").rows[0] as { total?: number } | undefined)?.total ?? 0),
+        events: independentObservationRows.map((row) => row.event)
       },
       events: eventRows.map((row) => row.event),
       drift: {
