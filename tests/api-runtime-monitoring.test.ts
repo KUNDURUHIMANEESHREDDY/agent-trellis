@@ -50,7 +50,7 @@ describe("runtime telemetry API", () => {
       tools: [{
         name: "write_file",
         description: "Write a file to the workspace.",
-        inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }
+        inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } }
       }]
     });
     const app = createApp(graph);

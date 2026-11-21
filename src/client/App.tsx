@@ -7,6 +7,7 @@ type Overview = { agents: number; mcpServers: number; discoveredMcpServers: numb
 type CapabilityIntelligence = { summary: { servers: number; analyzedServers: number; tools: number; analyzedTools: number; highRiskTools: number; criticalTools: number; unassociatedServers: number; capabilities: number }; capabilities: Record<string, any>[]; servers: Array<Record<string, any>> };
 type DiscoveredMcpServer = { id: string; name: string; hostName: string; hostSource: string; source: string; configPath: string; configScope: string; transport: string; command?: string; endpoint?: string; argumentCount: number; environmentKeys: string[]; headerNames: string[]; credentialHints: boolean };
 type MCPInspectionView = { id: string; serverId: string; serverName: string; result: string; severity: string; inspectedAt: string; transport: string; protocolEra: string; protocolVersion: string; serverInfoJson?: string; instructions?: string; declaredCapabilitiesJson?: string; observedCapabilitiesJson?: string; capabilityComparisonsJson?: string; errorSummary?: string; tools: Array<Record<string, unknown>> };
+type RuntimeMonitoring = { telemetryConfigured: boolean; summary: Record<string, number>; events: Record<string, any>[]; drift: { total: number; events: Record<string, any>[] } };
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   if (!response.ok) throw new Error((await response.json()).error || "Request failed");
@@ -30,10 +31,11 @@ function App() {
   const [discoveredServers,setDiscoveredServers]=useState<DiscoveredMcpServer[]>([]),[discoveryDiagnostics,setDiscoveryDiagnostics]=useState<{source:string;configPath:string;message:string}[]>([]);
   const [inspections,setInspections]=useState<MCPInspectionView[]>([]);
   const [capabilityIntelligence,setCapabilityIntelligence]=useState<CapabilityIntelligence>({summary:{servers:0,analyzedServers:0,tools:0,analyzedTools:0,highRiskTools:0,criticalTools:0,unassociatedServers:0,capabilities:0},capabilities:[],servers:[]});
+  const [runtimeMonitoring,setRuntimeMonitoring]=useState<RuntimeMonitoring>({telemetryConfigured:false,summary:{totalEvents:0,callsStarted:0,callsSucceeded:0,callsFailed:0,policyDenials:0,sideEffects:0,highSeveritySideEffects:0},events:[],drift:{total:0,events:[]}});
   const [associationSelections,setAssociationSelections]=useState<Record<string,string>>({});
   const [selected,setSelected]=useState<NodeItem|null>(null),[impact,setImpact]=useState<any>(null),[busy,setBusy]=useState(false);
   const [notice,setNotice]=useState(""),[view,setView]=useState("Overview"),[query,setQuery]=useState("");
-  const refresh=async()=>{const[o,g,a,e,d,i,c]=await Promise.all([api<Overview>("/api/overview"),api<GraphData>("/api/graph"),api<any[]>("/api/agents"),api<any[]>("/api/evidence"),api<DiscoveredMcpServer[]>("/api/discovery/mcp"),api<MCPInspectionView[]>("/api/inspection/mcp"),api<CapabilityIntelligence>("/api/capabilities/intelligence")]);setOverview(o);setGraph(g);setAgents(a);setEvidence(e);setDiscoveredServers(d);setInspections(i);setCapabilityIntelligence(c);if(selected)setSelected(g.nodes.find(n=>n.id===selected.id)??null);};
+  const refresh=async()=>{const[o,g,a,e,d,i,c,m]=await Promise.all([api<Overview>("/api/overview"),api<GraphData>("/api/graph"),api<any[]>("/api/agents"),api<any[]>("/api/evidence"),api<DiscoveredMcpServer[]>("/api/discovery/mcp"),api<MCPInspectionView[]>("/api/inspection/mcp"),api<CapabilityIntelligence>("/api/capabilities/intelligence"),api<RuntimeMonitoring>("/api/runtime/monitoring")]);setOverview(o);setGraph(g);setAgents(a);setEvidence(e);setDiscoveredServers(d);setInspections(i);setCapabilityIntelligence(c);setRuntimeMonitoring(m);if(selected)setSelected(g.nodes.find(n=>n.id===selected.id)??null);};
   const discover=async()=>{setBusy(true);try{const r=await api<{scannedConfigFiles:number;discoveredServers:number;diagnostics:{source:string;configPath:string;message:string}[];servers:DiscoveredMcpServer[]}>("/api/discovery/mcp",{method:"POST"});setDiscoveredServers(r.servers);setDiscoveryDiagnostics(r.diagnostics);setNotice("Read "+r.scannedConfigFiles+" local configuration file(s) · discovered "+r.discoveredServers+" MCP server definition(s) · no processes started.");await refresh();}catch(e){setNotice(e instanceof Error?e.message:"MCP discovery failed");}finally{setBusy(false);}};
   const inspectServer=async(server:DiscoveredMcpServer)=>{const approveStdio=server.transport==="stdio";setBusy(true);try{if(approveStdio){const preview=await api<{command:string;args:string[];cwd:string;environmentKeys:string[]}>("/api/inspection/mcp/"+encodeURIComponent(server.id)+"/approval-preview");const invocation=[preview.command,...preview.args].map(value=>JSON.stringify(value)).join(" ");const approved=window.confirm("This inspection will execute a local process. Review the command first:\n\n"+invocation+"\n\nWorking directory: "+preview.cwd+"\nEnvironment variable names: "+(preview.environmentKeys.join(", ")||"none")+"\nSensitive-looking values are redacted. Environment values are not displayed.\n\nProtocol negotiation may start a short-lived probe process before the inspection process. No MCP tools will be invoked. Continue?");if(!approved)return;}const result=await api<{result:string;protocolEra?:string;protocolVersion?:string;toolsCount:number;errorSummary?:string}>("/api/inspection/mcp/"+encodeURIComponent(server.id),{method:"POST",body:JSON.stringify({approveStdio})});setNotice(server.name+" · "+result.result+" · "+result.toolsCount+" tool(s) inspected"+(result.errorSummary?" · "+result.errorSummary:""));await refresh();}catch(e){setNotice(e instanceof Error?e.message:"MCP inspection failed");}finally{setBusy(false);}};
   const analyzeCapabilities=async()=>{setBusy(true);try{const result=await api<{analyzedTools:number;summary:CapabilityIntelligence["summary"]}>("/api/capabilities/analyze",{method:"POST"});await refresh();setNotice("Capability inference complete · "+result.analyzedTools+" tool(s) analyzed · "+result.summary.highRiskTools+" high-risk tool(s) identified.");}catch(e){setNotice(e instanceof Error?e.message:"Capability analysis failed");}finally{setBusy(false);}};
@@ -52,7 +54,7 @@ function App() {
       <div className="brand"><div className="brand-mark"><GitBranch size={19}/></div><div><b>agent<span>trellis</span></b><small>SECURITY INTELLIGENCE</small></div></div>
       <div className="workspace"><div className="workspace-icon">AT</div><div><b>Demo workspace</b><small>Personal environment</small></div><ChevronDown size={15}/></div>
       <div className="nav-label">WORKSPACE</div>
-      {([["Overview",Gauge],["Graph explorer",Network],["Agent inventory",Bot],["Evidence",FileCheck2],["Blast radius",ShieldAlert],["MCP discovery",Database],["Capability intelligence",Layers3]] as const).map(([label,Icon])=><button key={label} className={"nav-item "+(view===label?"active":"")} onClick={()=>setView(label)}><Icon size={17}/>{label}{label==="Evidence"&&<span className="nav-count">{evidence.length}</span>}</button>)}
+      {([["Overview",Gauge],["Graph explorer",Network],["Agent inventory",Bot],["Evidence",FileCheck2],["Blast radius",ShieldAlert],["MCP discovery",Database],["Capability intelligence",Layers3],["Runtime monitoring",Activity]] as const).map(([label,Icon])=><button key={label} className={"nav-item "+(view===label?"active":"")} onClick={()=>setView(label)}><Icon size={17}/>{label}{label==="Evidence"&&<span className="nav-count">{evidence.length}</span>}</button>)}
       <div className="nav-label nav-spaced">SYSTEM</div>
       <button className="nav-item" onClick={()=>setNotice("Relate embedded graph · persistent local store")}><Database size={17}/>Graph database</button>
       <button className="nav-item" onClick={()=>setNotice("API status: healthy · /api/health")}><TerminalSquare size={17}/>API & integrations</button>
@@ -69,8 +71,8 @@ function App() {
           <Metric icon={Zap} label="Registered tools" value={overview?.tools??"—"} sub={(overview?.highRiskTools??0)+" high-risk tools"} tone="amber"/>
           <Metric icon={AlertTriangle} label="Failed findings" value={overview?.failedFindings??"—"} sub="Evidence-backed" tone="red"/><Metric icon={Database} label="Discovered MCP" value={overview?.discoveredMcpServers??0} sub="Local configs" tone="teal"/>
         </section>
-        <div className={"section-row "+(["Agent inventory","Evidence","MCP discovery","Capability intelligence"].includes(view)?"hidden":"")}><div><h2>Connected environment</h2><p>Live relationships stored in your embedded Relate graph.</p></div><div className="graph-legend"><span><i className="legend-dot violet"/> Agent</span><span><i className="legend-dot teal"/> MCP</span><span><i className="legend-dot amber"/> Tool</span><span><i className="legend-dot lilac"/> Capability</span><span><i className="legend-dot blue"/> Policy</span></div></div>
-        <section className={"graph-layout "+(["Agent inventory","Evidence","MCP discovery","Capability intelligence"].includes(view)?"hidden":"")}>
+        <div className={"section-row "+(["Agent inventory","Evidence","MCP discovery","Capability intelligence","Runtime monitoring"].includes(view)?"hidden":"")}><div><h2>Connected environment</h2><p>Live relationships stored in your embedded Relate graph.</p></div><div className="graph-legend"><span><i className="legend-dot violet"/> Agent</span><span><i className="legend-dot teal"/> MCP</span><span><i className="legend-dot amber"/> Tool</span><span><i className="legend-dot lilac"/> Capability</span><span><i className="legend-dot blue"/> Policy</span></div></div>
+        <section className={"graph-layout "+(["Agent inventory","Evidence","MCP discovery","Capability intelligence","Runtime monitoring"].includes(view)?"hidden":"")}>
           <div className="graph-card"><div className="graph-toolbar"><div className="graph-title"><Network size={16}/> RELATIONSHIP MAP <span>{graph.nodes.length} NODES · {graph.edges.length} EDGES</span></div><label className="search-box"><Search size={14}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Find a node..."/></label></div>
             <div className="graph-canvas" style={{height:Math.max(610,graphLayout.height*0.7)+"px"}}><div className="graph-columns"><span>AGENTS / HOSTS</span><span>INFRASTRUCTURE</span><span>TOOLS</span><span>CAPABILITIES</span><span>CONTROLS</span></div>
               <svg className="edges" viewBox={"0 0 1180 "+graphLayout.height} preserveAspectRatio="none">{graph.edges.map((edge,i)=>{const a=graphLayout.positions[edge.source],b=graphLayout.positions[edge.target];if(!a||!b)return null;const active=impact&&(edge.source===selected?.id||edge.target===selected?.id||impact.affectedAgents?.some((x:any)=>x.id===edge.source||x.id===edge.target));return <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className={active?"edge highlighted":"edge"}/>;})}</svg>
@@ -121,7 +123,39 @@ function App() {
             </div>)}</div>}
           </article>)}</div>}
         </section>
-        <div className={"bottom-grid "+(view==="Graph explorer"||view==="MCP discovery"||view==="Capability intelligence"?"hidden":"")+((view==="Agent inventory"||view==="Evidence")?" single":"")}>
+        <section className={"capability-panel "+(view==="Runtime monitoring"?"":"hidden")}>
+          <div className="capability-summary">
+            <div><span className="eyebrow">EXECUTION-TIME EVIDENCE</span><h2>Runtime security monitoring</h2><p>Authenticated events reported by an execution adapter, kept separate from schema-derived capability inference.</p></div>
+            <div className="capability-summary-stats">
+              <div><b>{runtimeMonitoring.summary.totalEvents??0}</b><small>RUNTIME EVENTS</small></div>
+              <div><b>{runtimeMonitoring.summary.callsFailed??0}</b><small>FAILED CALLS</small></div>
+              <div><b>{runtimeMonitoring.summary.policyDenials??0}</b><small>POLICY DENIALS</small></div>
+              <div><b>{runtimeMonitoring.summary.sideEffects??0}</b><small>REPORTED SIDE EFFECTS</small></div>
+            </div>
+          </div>
+          <div className="capability-safety"><ShieldCheck size={16}/><span>{runtimeMonitoring.telemetryConfigured?"Telemetry ingestion is enabled. Events require the configured shared token.":"Telemetry ingestion is disabled. Configure AGENT_TRELLIS_RUNTIME_TOKEN and restart the API."} The API accepts normalized event metadata only; raw tool arguments, results, credentials and request headers are rejected. Events represent adapter-reported observations, not independently verified proof of exploitability.</span></div>
+          <div className="runtime-monitoring-grid">
+            <div className="runtime-monitoring-column">
+              <div className="capability-tools-head"><b>Recent runtime events</b><small>{runtimeMonitoring.events.length} shown</small></div>
+              {runtimeMonitoring.events.length===0?<div className="capability-empty">No runtime events have been ingested. Connect a trusted execution adapter to POST /api/runtime/events.</div>:runtimeMonitoring.events.map((event:any)=><article className="runtime-event" key={event.id}>
+                <div><b>{event.toolName}</b><small>{event.serverName} · {event.eventType} · {new Date(event.observedAt).toLocaleString()}</small></div>
+                <span className={"tool-risk "+String(event.severity??"INFO").toLowerCase()}>{event.severity}</span>
+                {event.effect&&<small className="runtime-event-detail">Observed effect: {event.effect}</small>}
+                {event.agentName&&<small className="runtime-event-detail">Agent: {event.agentName}</small>}
+                {event.durationMs!==undefined&&<small className="runtime-event-detail">Duration: {event.durationMs} ms</small>}
+              </article>)}
+            </div>
+            <div className="runtime-monitoring-column">
+              <div className="capability-tools-head"><b>Schema drift history</b><small>{runtimeMonitoring.drift.total} detected change set(s)</small></div>
+              {runtimeMonitoring.drift.events.length===0?<div className="capability-empty">No drift detected. Reinspect a server after its tool catalogue changes to compare it with the persisted baseline.</div>:runtimeMonitoring.drift.events.map((event:any)=><article className="runtime-event" key={event.id}>
+                <div><b>{event.serverName}</b><small>{new Date(event.inspectedAt).toLocaleString()} · {event.changeCount} change(s)</small></div>
+                <span className={"tool-risk "+String(event.severity??"MEDIUM").toLowerCase()}>{event.severity}</span>
+                <details className="inspection-details"><summary>View detected changes</summary><pre>{event.changesJson}</pre></details>
+              </article>)}
+            </div>
+          </div>
+        </section>
+        <div className={"bottom-grid "+(view==="Graph explorer"||view==="MCP discovery"||view==="Capability intelligence"||view==="Runtime monitoring"?"hidden":"")+((view==="Agent inventory"||view==="Evidence")?" single":"")}>
           <section className={"panel "+(view==="Evidence"?"hidden":"")}><div className="panel-heading"><div><h2>Agent inventory</h2><p>Registered autonomous systems</p></div><button className="text-button" onClick={()=>setView("Agent inventory")}>View all <ArrowUpRight size={14}/></button></div>
             {agents.map(a=><div className="agent-row" key={a.id}><div className="agent-icon"><Bot size={17}/></div><div className="agent-info"><b>{a.name}</b><small>{a.owner}</small></div><span className={"risk-badge "+a.risk.toLowerCase()}>{a.risk} RISK</span><span className="agent-status"><i/>{a.status}</span></div>)}
           </section>

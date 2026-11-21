@@ -21,6 +21,9 @@ A security finding is rarely isolated. A vulnerable MCP tool can affect several 
 - Live MCP inspection via the official TypeScript client SDK over stdio, Streamable HTTP and legacy SSE.
 - Negotiates modern `server/discover` or legacy `initialize`, inspects tool names and JSON schemas, and checks declared tools/resources/prompts support with read-only list methods.
 - Persists inspection outcomes, capability comparisons and tool schemas as graph-linked evidence. Local stdio launches require explicit approval.
+- Compares each successful tool inventory inspection with its persisted baseline, versions changed tool schemas and creates graph-linked drift evidence; failed/incomplete inspections never erase the last known tool inventory.
+- Re-runs capability inference after successful inventory refreshes so capability edges and agent exposure summaries track the latest inspected schemas.
+- Provides a token-authenticated runtime event ingestion contract for external execution adapters, with idempotent event IDs, normalized effect categories and a metadata-only payload policy. Runtime event evidence is stored separately from static capability inference.
 
 ## Requirements
 
@@ -43,6 +46,14 @@ The graph is stored under `.data/agent-trellis/`. It is persistent across restar
 Call `POST /api/discovery/mcp` to scan known local configuration files, then `GET /api/discovery/mcp` to read the persisted inventory. AgentTrellis reads configuration metadata only: it does not launch configured processes, connect to MCP servers, or invoke tools. Credential values, command arguments, environment values and header values are not stored. The inventory retains only command names, argument counts, endpoint origins/paths, and environment/header key names.
 
 Discovery supports Claude Desktop, Claude Code user/local configuration, Cursor global/workspace configuration, Windsurf global configuration, GitHub Copilot CLI, and workspace-root `.mcp.json`. It scans the current working directory plus roots listed in `AGENT_TRELLIS_WORKSPACES`, separated by the operating system path delimiter. The API and development server bind to loopback because discovery reads files on the local machine.
+
+### Runtime telemetry and schema drift
+
+Set AGENT_TRELLIS_RUNTIME_TOKEN to a unique random secret in the API environment and restart AgentTrellis. A trusted execution adapter can then send normalized events to POST /api/runtime/events with the x-agent-trellis-token header. Use a stable, unique eventId per event and include executionId, serverId, toolName, eventType and an optional ISO timestamp/duration. Supported event types are CALL_STARTED, CALL_SUCCEEDED, CALL_FAILED, POLICY_DENIED and SIDE_EFFECT_OBSERVED. Side-effect events must include a normalized effect such as filesystem_write or database_write.
+
+The ingestion validator deliberately rejects raw arguments, results, credentials, headers and environment values. It stores only normalized metadata and hashes for idempotency; it does not independently inspect tool inputs or outputs. GET /api/runtime/monitoring exposes the recent event ledger and schema-drift history. Runtime ingestion is disabled when no token is configured. Events are trusted-adapter reports, not proof of exploitability.
+
+Schema drift is detected when a successful Inspect server operation is repeated after a tool catalogue changes. It records additions, removals, descriptions, input/output schema and annotation changes, and automatically refreshes capability inference. This is inspection-triggered monitoring, not a background polling service. A runtime adapter must be wired into the agent execution path to report actual calls and effects.
 
 ### Live MCP inspection
 
@@ -79,4 +90,4 @@ This repository is a standalone project for the Relate by Neo4j hackathon. It is
 
 ## Status
 
-Early implementation. The graph includes deterministic demo data, local MCP discovery, user-triggered live inspection, deterministic schema-derived capability intelligence, exposure scoring and explicit agent-to-server association. Runtime execution telemetry and continuous policy enforcement remain planned.
+Early implementation. The graph includes deterministic demo data, local MCP discovery, user-triggered live inspection, deterministic schema-derived capability intelligence, exposure scoring, explicit agent-to-server association, inspection-triggered schema drift detection and authenticated runtime event ingestion. An execution adapter still needs to be integrated with each agent runtime; periodic inspection scheduling and continuous policy enforcement are not yet implemented.
