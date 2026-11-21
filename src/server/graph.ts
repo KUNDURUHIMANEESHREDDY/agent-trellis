@@ -843,6 +843,7 @@ export class AgentGraph {
     failedServers: number;
     skippedStdioServers: number;
     skippedUnsupportedServers: number;
+    skippedBusyServers: number;
     errors: number;
   }) {
     const id = "evidence-monitor-run-" + createHash("sha256")
@@ -874,6 +875,7 @@ export class AgentGraph {
           lastFailedServers: run.failedServers,
           lastSkippedStdioServers: run.skippedStdioServers,
           lastSkippedUnsupportedServers: run.skippedUnsupportedServers,
+          lastSkippedBusyServers: run.skippedBusyServers,
           lastErrors: run.errors
         }
       }

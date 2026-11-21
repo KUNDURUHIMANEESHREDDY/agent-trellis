@@ -124,6 +124,7 @@ describe("continuous MCP monitor", () => {
     monitor.start();
     const busy = await monitor.runOnce();
     expect(busy.busy).toBe(true);
+    expect(monitor.acquireServer(server.id)).toBe(false);
     monitor.stop();
     resolveInspect?.({
       serverId: server.id, serverName: server.name, inspectedAt: new Date().toISOString(),
@@ -136,5 +137,7 @@ describe("continuous MCP monitor", () => {
       tools: []
     });
     await Promise.resolve();
+    expect(monitor.acquireServer(server.id)).toBe(true);
+    monitor.releaseServer(server.id);
   });
 });

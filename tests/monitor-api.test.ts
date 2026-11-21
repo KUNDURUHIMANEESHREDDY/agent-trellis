@@ -27,7 +27,26 @@ describe("continuous monitor API", () => {
         inspect: async () => { throw new Error("No servers should be inspected"); }
       }
     });
+    const server = {
+      id: "locked-api-server",
+      hostId: "locked-api-host",
+      hostName: "API lock host",
+      source: "test",
+      configPath: path.join(root, "locked.json"),
+      configScope: "workspace",
+      name: "locked-api-server",
+      transport: "http" as const,
+      endpoint: "https://locked.example.test/mcp",
+      argumentCount: 0,
+      environmentKeys: [],
+      headerNames: [],
+      credentialHints: false
+    };
+    graph.syncMcpDiscovery({ scannedConfigPaths: [server.configPath], servers: [server], diagnostics: [] });
     const app = createApp(graph, monitor);
+    expect(monitor.acquireServer(server.id)).toBe(true);
+    await request(app).post("/api/inspection/mcp/" + server.id).send({}).expect(409);
+    monitor.releaseServer(server.id);
     await request(app).get("/api/monitor/status").expect(200).then((res) => {
       expect(res.body.configuration).toMatchObject({ enabled: false, intervalMs: 0, includeStdio: false });
       expect(res.body.lastPersistedRun).toBeNull();

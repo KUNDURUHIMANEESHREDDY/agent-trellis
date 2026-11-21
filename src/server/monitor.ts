@@ -15,6 +15,7 @@ export interface MCPMonitorRunResult {
   failedServers: number;
   skippedStdioServers: number;
   skippedUnsupportedServers: number;
+  skippedBusyServers: number;
   errors: number;
   busy?: boolean;
 }
@@ -68,6 +69,7 @@ export class MCPContinuousMonitor {
   private readonly now: () => Date;
   private timer?: NodeJS.Timeout;
   private running = false;
+  private readonly activeServerInspections = new Set<string>();
   private lastRun?: MCPMonitorRunResult;
 
   constructor(graph: AgentGraph, options: MCPMonitorOptions = {}) {
@@ -84,6 +86,16 @@ export class MCPContinuousMonitor {
     if (!Number.isInteger(this.intervalMs) || this.intervalMs < 0 || this.intervalMs > 24 * 60 * 60 * 1000) {
       throw new Error("Monitor interval must be an integer between 0 and 86400000 milliseconds.");
     }
+  }
+
+  acquireServer(serverId: string): boolean {
+    if (this.activeServerInspections.has(serverId)) return false;
+    this.activeServerInspections.add(serverId);
+    return true;
+  }
+
+  releaseServer(serverId: string): void {
+    this.activeServerInspections.delete(serverId);
   }
 
   getStatus(): MCPMonitorStatus {
@@ -119,6 +131,7 @@ export class MCPContinuousMonitor {
         failedServers: 0,
         skippedStdioServers: 0,
         skippedUnsupportedServers: 0,
+        skippedBusyServers: 0,
         errors: 0,
         busy: true
       };
@@ -134,6 +147,7 @@ export class MCPContinuousMonitor {
       failedServers: 0,
       skippedStdioServers: 0,
       skippedUnsupportedServers: 0,
+      skippedBusyServers: 0,
       errors: 0
     };
 
@@ -152,6 +166,10 @@ export class MCPContinuousMonitor {
           continue;
         }
 
+        if (!this.acquireServer(server.id)) {
+          summary.skippedBusyServers += 1;
+          continue;
+        }
         try {
           const target = this.dependencies.resolve(server.id, { workspaceRoots: this.workspaceRoots });
           if (!target) {
@@ -169,6 +187,8 @@ export class MCPContinuousMonitor {
         } catch {
           summary.failedServers += 1;
           summary.errors += 1;
+        } finally {
+          this.releaseServer(server.id);
         }
       }
     } catch {

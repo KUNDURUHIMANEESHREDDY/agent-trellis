@@ -145,7 +145,7 @@ export function createApp(graph: AgentGraph, monitor?: MCPContinuousMonitor) {
     if (server.transport === "stdio" && req.body?.approveStdio !== true) {
       return res.status(428).json({ error: "Local stdio process execution requires explicit approval." });
     }
-    if (activeInspections.has(serverId)) {
+    if (activeInspections.has(serverId) || (monitor && !monitor.acquireServer(serverId))) {
       return res.status(409).json({ error: "An inspection for this MCP server is already running." });
     }
 
@@ -175,6 +175,7 @@ export function createApp(graph: AgentGraph, monitor?: MCPContinuousMonitor) {
       });
     } finally {
       activeInspections.delete(serverId);
+      monitor?.releaseServer(serverId);
     }
   });
   app.post("/api/discovery/mcp", (_req, res) => {
