@@ -882,7 +882,7 @@ export class AgentGraph {
       "MATCH (e:Evidence {id: $evidenceId}), (m:MCPMonitor {id: 'mcp-monitor'}) MERGE (e)-[:RECORDED_BY]->(m)",
       { evidenceId: id }
     );
-    return { id, ...properties };
+    return properties;
   }
 
   getMonitorStatus() {

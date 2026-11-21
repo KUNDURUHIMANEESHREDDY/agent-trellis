@@ -88,19 +88,36 @@ describe("continuous MCP monitor", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trellis-monitor-lock-"));
     const graph = new AgentGraph(path.join(root, "graph"));
     await graph.initialize();
-    const discovered: MCPDiscoveryResult = { scannedConfigPaths: [], servers: [], diagnostics: [] };
-    let resolveInspect: (() => void) | undefined;
+    const server = {
+      id: "http-lock-server",
+      hostId: "http-lock-host",
+      hostName: "Lock test host",
+      source: "test",
+      configPath: path.join(root, "http.json"),
+      configScope: "workspace",
+      name: "http-lock-server",
+      transport: "http" as const,
+      endpoint: "https://lock.example.test/mcp",
+      argumentCount: 0,
+      environmentKeys: [],
+      headerNames: [],
+      credentialHints: false
+    };
+    const discovered: MCPDiscoveryResult = {
+      scannedConfigPaths: [server.configPath],
+      servers: [server],
+      diagnostics: []
+    };
+    const target = { server, config: { url: server.endpoint } } as MCPInspectionTarget;
+    let resolveInspect: ((value: MCPInspectionOutcome) => void) | undefined;
     const monitor = new MCPContinuousMonitor(graph, {
       intervalMs: 30_000,
+      workspaceRoots: [root],
       dependencies: {
         discover: () => discovered,
-        resolve: () => null,
-        inspect: async () => new Promise<MCPInspectionOutcome>((resolve) => {
-          resolveInspect = () => resolve({
-            serverId: "none", serverName: "none", inspectedAt: new Date().toISOString(),
-            success: true, transport: "http", declaredCapabilities: [], observedCapabilities: [],
-            capabilityComparisons: [], tools: []
-          });
+        resolve: () => target,
+        inspect: () => new Promise<MCPInspectionOutcome>((resolve) => {
+          resolveInspect = resolve;
         })
       }
     });
@@ -108,6 +125,16 @@ describe("continuous MCP monitor", () => {
     const busy = await monitor.runOnce();
     expect(busy.busy).toBe(true);
     monitor.stop();
-    resolveInspect?.();
+    resolveInspect?.({
+      serverId: server.id, serverName: server.name, inspectedAt: new Date().toISOString(),
+      success: true, transport: "http", declaredCapabilities: ["tools"], observedCapabilities: ["tools"],
+      capabilityComparisons: [
+        { capability: "tools", declared: true, observed: true, status: "consistent" },
+        { capability: "resources", declared: false, observed: null, status: "not_checked" },
+        { capability: "prompts", declared: false, observed: null, status: "not_checked" }
+      ],
+      tools: []
+    });
+    await Promise.resolve();
   });
 });

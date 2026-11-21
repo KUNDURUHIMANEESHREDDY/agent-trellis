@@ -40,7 +40,16 @@ function App() {
   const [discoveredServers,setDiscoveredServers]=useState<DiscoveredMcpServer[]>([]),[discoveryDiagnostics,setDiscoveryDiagnostics]=useState<{source:string;configPath:string;message:string}[]>([]);
   const [inspections,setInspections]=useState<MCPInspectionView[]>([]);
   const [capabilityIntelligence,setCapabilityIntelligence]=useState<CapabilityIntelligence>({summary:{servers:0,analyzedServers:0,tools:0,analyzedTools:0,highRiskTools:0,criticalTools:0,unassociatedServers:0,capabilities:0},capabilities:[],servers:[]});
-  const [runtimeMonitoring,setRuntimeMonitoring]=useState<RuntimeMonitoring>({telemetryConfigured:false,summary:{totalEvents:0,callsStarted:0,callsSucceeded:0,callsFailed:0,policyDenials:0,sideEffects:0,highSeveritySideEffects:0},events:[],drift:{total:0,events:[]}});
+  const [runtimeMonitoring,setRuntimeMonitoring]=useState<RuntimeMonitoring>({
+    telemetryConfigured:false,
+    summary:{totalEvents:0,callsStarted:0,callsSucceeded:0,callsFailed:0,policyDenials:0,sideEffects:0,highSeveritySideEffects:0},
+    events:[],
+    drift:{total:0,events:[]},
+    capabilityDrift:{total:0,permissionEscalations:0,events:[]},
+    blastRadius:{total:0,expanded:0,events:[]},
+    monitorRuns:{total:0,latest:null,events:[]},
+    monitorStatus:{enabled:false,intervalMs:0,includeStdio:false,running:false}
+  });
   const [associationSelections,setAssociationSelections]=useState<Record<string,string>>({});
   const [selected,setSelected]=useState<NodeItem|null>(null),[impact,setImpact]=useState<any>(null),[busy,setBusy]=useState(false);
   const [notice,setNotice]=useState(""),[view,setView]=useState("Overview"),[query,setQuery]=useState("");
