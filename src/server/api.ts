@@ -6,8 +6,9 @@ import { timingSafeEqual } from "node:crypto";
 import { AgentGraph } from "./graph";
 import { discoverMcpConfigurations, resolveMcpServerConfig } from "./discovery";
 import { inspectMcpServer } from "./mcp-inspector";
+import type { MCPContinuousMonitor } from "./monitor";
 
-export function createApp(graph: AgentGraph) {
+export function createApp(graph: AgentGraph, monitor?: MCPContinuousMonitor) {
   const app = express();
   const apiPort = Number(process.env.PORT || 8787);
   const allowedOrigins = new Set([
@@ -32,8 +33,23 @@ export function createApp(graph: AgentGraph) {
   app.get("/api/inspection/mcp", (_req, res) => res.json(graph.getMcpInspections()));
   app.get("/api/runtime/monitoring", (_req, res) => res.json({
     ...graph.getRuntimeMonitoring(),
-    telemetryConfigured: Boolean(process.env.AGENT_TRELLIS_RUNTIME_TOKEN)
+    telemetryConfigured: Boolean(process.env.AGENT_TRELLIS_RUNTIME_TOKEN),
+    monitorStatus: monitor?.getStatus() ?? {
+      enabled: false, intervalMs: 0, includeStdio: false, running: false
+    }
   }));
+  app.get("/api/monitor/status", (_req, res) => res.json({
+    configuration: monitor?.getStatus() ?? {
+      enabled: false, intervalMs: 0, includeStdio: false, running: false
+    },
+    lastPersistedRun: graph.getMonitorStatus()
+  }));
+  app.post("/api/monitor/run", async (_req, res) => {
+    if (!monitor) return res.status(503).json({ error: "Continuous MCP monitor is not configured in this server process." });
+    const result = await monitor.runOnce();
+    if (result.busy) return res.status(409).json({ error: "A monitor cycle is already running." });
+    return res.status(202).json(result);
+  });
   app.post("/api/runtime/events", (req, res) => {
     const configuredToken = process.env.AGENT_TRELLIS_RUNTIME_TOKEN;
     if (!configuredToken) {

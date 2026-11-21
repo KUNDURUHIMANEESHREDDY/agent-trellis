@@ -94,5 +94,8 @@
 .runtime-event b{font-size:10px;color:#d8e2f1}
 .runtime-event small{display:block;margin-top:4px;font-size:8px;color:#8799b1;overflow-wrap:anywhere}
 .runtime-event-detail{margin-top:6px!important}
+.monitor-metrics{margin:10px 0}
+.monitor-run-status{display:flex;justify-content:space-between;gap:12px;padding:9px 11px;margin-top:8px;border:1px solid #2b3d57;border-radius:7px;background:#0d1828;color:#96a9c1;font-size:8px}
+.monitor-run-status span:last-child{font-weight:700;letter-spacing:.4px}
 @media(max-width:900px){.runtime-monitoring-grid{grid-template-columns:1fr}.capability-summary{align-items:flex-start;flex-direction:column}.capability-summary-stats{width:100%;grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:620px){.capability-summary-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.association-form{align-items:stretch;flex-direction:column}.association-form .button{justify-content:center}.capability-server-head{align-items:flex-start}}

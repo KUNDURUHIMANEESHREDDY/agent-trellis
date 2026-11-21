@@ -7,7 +7,16 @@ type Overview = { agents: number; mcpServers: number; discoveredMcpServers: numb
 type CapabilityIntelligence = { summary: { servers: number; analyzedServers: number; tools: number; analyzedTools: number; highRiskTools: number; criticalTools: number; unassociatedServers: number; capabilities: number }; capabilities: Record<string, any>[]; servers: Array<Record<string, any>> };
 type DiscoveredMcpServer = { id: string; name: string; hostName: string; hostSource: string; source: string; configPath: string; configScope: string; transport: string; command?: string; endpoint?: string; argumentCount: number; environmentKeys: string[]; headerNames: string[]; credentialHints: boolean };
 type MCPInspectionView = { id: string; serverId: string; serverName: string; result: string; severity: string; inspectedAt: string; transport: string; protocolEra: string; protocolVersion: string; serverInfoJson?: string; instructions?: string; declaredCapabilitiesJson?: string; observedCapabilitiesJson?: string; capabilityComparisonsJson?: string; errorSummary?: string; tools: Array<Record<string, unknown>> };
-type RuntimeMonitoring = { telemetryConfigured: boolean; summary: Record<string, number>; events: Record<string, any>[]; drift: { total: number; events: Record<string, any>[] } };
+type RuntimeMonitoring = {
+  telemetryConfigured: boolean;
+  summary: Record<string, number>;
+  events: Record<string, any>[];
+  drift: { total: number; events: Record<string, any>[] };
+  capabilityDrift: { total: number; permissionEscalations: number; events: Record<string, any>[] };
+  blastRadius: { total: number; expanded: number; events: Record<string, any>[] };
+  monitorRuns: { total: number; latest: Record<string, any> | null; events: Record<string, any>[] };
+  monitorStatus: { enabled: boolean; intervalMs: number; includeStdio: boolean; running: boolean; lastRun?: Record<string, any> };
+};
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   if (!response.ok) throw new Error((await response.json()).error || "Request failed");
@@ -41,6 +50,7 @@ function App() {
   const analyzeCapabilities=async()=>{setBusy(true);try{const result=await api<{analyzedTools:number;summary:CapabilityIntelligence["summary"]}>("/api/capabilities/analyze",{method:"POST"});await refresh();setNotice("Capability inference complete · "+result.analyzedTools+" tool(s) analyzed · "+result.summary.highRiskTools+" high-risk tool(s) identified.");}catch(e){setNotice(e instanceof Error?e.message:"Capability analysis failed");}finally{setBusy(false);}};
   const associateServer=async(serverId:string)=>{const agentId=associationSelections[serverId];if(!agentId)return;setBusy(true);try{await api("/api/agents/"+encodeURIComponent(agentId)+"/mcp-servers/"+encodeURIComponent(serverId),{method:"POST",body:JSON.stringify({})});await refresh();setNotice("MCP server associated with the selected agent.");}catch(e){setNotice(e instanceof Error?e.message:"Association failed");}finally{setBusy(false);}};
   const removeServerAssociation=async(agentId:string,serverId:string)=>{setBusy(true);try{await api("/api/agents/"+encodeURIComponent(agentId)+"/mcp-servers/"+encodeURIComponent(serverId),{method:"DELETE"});await refresh();setNotice("Agent-to-server association removed.");}catch(e){setNotice(e instanceof Error?e.message:"Could not remove association");}finally{setBusy(false);}};
+  const runMonitor=async()=>{setBusy(true);try{const result=await api<{inspectedServers:number;failedServers:number;skippedStdioServers:number;busy?:boolean}>("/api/monitor/run",{method:"POST"});await refresh();setNotice("Monitor cycle complete · "+result.inspectedServers+" inspected · "+result.failedServers+" failed · "+result.skippedStdioServers+" stdio server(s) skipped.");}catch(e){setNotice(e instanceof Error?e.message:"Monitor run failed");}finally{setBusy(false);}};
   useEffect(()=>{refresh().catch(e=>setNotice(e.message));},[]);
   const visible=useMemo(()=>graph.nodes.filter(n=>[n.properties.name,n.properties.title,n.properties.id,n.labels[0]].join(" ").toLowerCase().includes(query.toLowerCase())),[graph.nodes,query]);
   const graphLayout=useMemo(()=>{const map:Record<string,[number,number]>={...positions};const hosts=graph.nodes.filter(n=>n.labels.includes("MCPHost")).sort((a,b)=>String(a.properties.name).localeCompare(String(b.properties.name)));const servers=graph.nodes.filter(n=>n.labels.includes("MCPServer")&&n.properties.discovered===true).sort((a,b)=>String(a.properties.name).localeCompare(String(b.properties.name)));const discoveredTools=graph.nodes.filter(n=>n.labels.includes("Tool")&&n.properties.mcpDiscovered===true).sort((a,b)=>String(a.properties.name).localeCompare(String(b.properties.name)));const inferredCapabilities=graph.nodes.filter(n=>n.labels.includes("Capability")&&n.properties.source==="schema-inference").sort((a,b)=>String(a.properties.name).localeCompare(String(b.properties.name)));const rows=Math.max(hosts.length,servers.length,discoveredTools.length,inferredCapabilities.length);hosts.forEach((n,i)=>{map[n.id]=[112,880+i*92];});servers.forEach((n,i)=>{map[n.id]=[340,880+i*92];});discoveredTools.forEach((n,i)=>{map[n.id]=[570,880+i*92];});inferredCapabilities.forEach((n,i)=>{map[n.id]=[810,880+i*92];});return{positions:map,height:Math.max(880,880+rows*92)};},[graph.nodes]);
@@ -63,7 +73,7 @@ function App() {
     <main className="main">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> {view}</div><div className="top-actions"><div className="status-pill"><span className="pulse-dot"/> All systems operational</div><button className="icon-button" title="Refresh" onClick={()=>refresh()}><RefreshCw size={16}/></button><button className="icon-button" title="Command menu"><Command size={16}/></button><div className="top-avatar">R</div></div></header>
       <div className="content">
-        <div className="page-heading"><div><div className="eyebrow"><Sparkles size={13}/> CONNECTED SECURITY CONTEXT</div><h1>{view==="Overview"?"Agent security overview":view}</h1><p>See how agents, tools, permissions and evidence connect across your environment.</p></div><div className="heading-actions">{view==="MCP discovery"?<button className="button primary" onClick={discover} disabled={busy}><Search size={15}/>{busy?"Scanning...":"Discover local MCP"}</button>:view==="Capability intelligence"?<button className="button primary" onClick={analyzeCapabilities} disabled={busy}><Layers3 size={15}/>{busy?"Analyzing...":"Analyze capabilities"}</button>:<><button className="button secondary" onClick={reset} disabled={busy}><RefreshCw size={15}/> Reset demo</button><button className="button primary" onClick={()=>{setView("Blast radius");const n=graph.nodes.find(n=>n.id==="tool-fetch");if(n)select(n);}}><Play size={15}/> Run simulation</button></>}</div></div>
+        <div className="page-heading"><div><div className="eyebrow"><Sparkles size={13}/> CONNECTED SECURITY CONTEXT</div><h1>{view==="Overview"?"Agent security overview":view}</h1><p>See how agents, tools, permissions and evidence connect across your environment.</p></div><div className="heading-actions">{view==="MCP discovery"?<button className="button primary" onClick={discover} disabled={busy}><Search size={15}/>{busy?"Scanning...":"Discover local MCP"}</button>:view==="Capability intelligence"?<button className="button primary" onClick={analyzeCapabilities} disabled={busy}><Layers3 size={15}/>{busy?"Analyzing...":"Analyze capabilities"}</button>:view==="Runtime monitoring"?<button className="button primary" onClick={runMonitor} disabled={busy||runtimeMonitoring.monitorStatus.running}><Activity size={15}/>{busy||runtimeMonitoring.monitorStatus.running?"Monitoring...":"Run security scan"}</button>:<><button className="button secondary" onClick={reset} disabled={busy}><RefreshCw size={15}/> Reset demo</button><button className="button primary" onClick={()=>{setView("Blast radius");const n=graph.nodes.find(n=>n.id==="tool-fetch");if(n)select(n);}}><Play size={15}/> Run simulation</button></>}</div></div>
         {notice&&<div className="notice"><Activity size={15}/>{notice}<button onClick={()=>setNotice("")}>×</button></div>}
         <section className={"metrics "+(view==="Overview"?"":"hidden")}>
           <Metric icon={Bot} label="Connected agents" value={overview?.agents??"—"} sub="Across 3 teams" tone="violet"/>
@@ -125,7 +135,7 @@ function App() {
         </section>
         <section className={"capability-panel "+(view==="Runtime monitoring"?"":"hidden")}>
           <div className="capability-summary">
-            <div><span className="eyebrow">EXECUTION-TIME EVIDENCE</span><h2>Runtime security monitoring</h2><p>Authenticated events reported by an execution adapter, kept separate from schema-derived capability inference.</p></div>
+            <div><span className="eyebrow">CONTINUOUS SECURITY MONITOR</span><h2>Security monitoring</h2><p>Scheduled read-only MCP inspections, inferred permission changes, blast-radius history and separately reported execution events.</p></div>
             <div className="capability-summary-stats">
               <div><b>{runtimeMonitoring.summary.totalEvents??0}</b><small>RUNTIME EVENTS</small></div>
               <div><b>{runtimeMonitoring.summary.callsFailed??0}</b><small>FAILED CALLS</small></div>
@@ -133,7 +143,14 @@ function App() {
               <div><b>{runtimeMonitoring.summary.sideEffects??0}</b><small>REPORTED SIDE EFFECTS</small></div>
             </div>
           </div>
-          <div className="capability-safety"><ShieldCheck size={16}/><span>{runtimeMonitoring.telemetryConfigured?"Telemetry ingestion is enabled. Events require the configured shared token.":"Telemetry ingestion is disabled. Configure AGENT_TRELLIS_RUNTIME_TOKEN and restart the API."} The API accepts normalized event metadata only; raw tool arguments, results, credentials and request headers are rejected. Events represent adapter-reported observations, not independently verified proof of exploitability.</span></div>
+          <div className="capability-safety"><ShieldCheck size={16}/><span>{runtimeMonitoring.monitorStatus.enabled?"Automatic monitor is enabled every "+Math.round(runtimeMonitoring.monitorStatus.intervalMs/60000)+" minute(s).":"Automatic monitor scheduling is disabled."} HTTP and SSE servers are reinspected automatically. Local stdio servers are {runtimeMonitoring.monitorStatus.includeStdio?"enabled by explicit configuration.":"skipped unless AGENT_TRELLIS_MONITOR_STDIO=true is configured."} This process compares exposed tool metadata; it does not invoke MCP tools. {runtimeMonitoring.telemetryConfigured?"Runtime event ingestion is enabled.":"Runtime event ingestion is disabled until AGENT_TRELLIS_RUNTIME_TOKEN is configured."} Adapter-reported events remain separate from schema-derived inferences.</span></div>
+          <div className="capability-summary-stats monitor-metrics">
+            <div><b>{runtimeMonitoring.drift.total}</b><small>SCHEMA DRIFT</small></div>
+            <div><b>{runtimeMonitoring.capabilityDrift.total}</b><small>CAPABILITY DRIFT</small></div>
+            <div><b>{runtimeMonitoring.capabilityDrift.permissionEscalations}</b><small>PERMISSION ESCALATIONS</small></div>
+            <div><b>{runtimeMonitoring.blastRadius.total}</b><small>BLAST-RADIUS CHANGES</small></div>
+          </div>
+          <div className="monitor-run-status"><span>Last monitor run: {runtimeMonitoring.monitorRuns.latest?.completedAt?new Date(runtimeMonitoring.monitorRuns.latest.completedAt).toLocaleString():"Not run yet"}</span><span>{runtimeMonitoring.monitorStatus.running?"RUNNING":runtimeMonitoring.monitorRuns.latest?.result??"IDLE"}</span></div>
           <div className="runtime-monitoring-grid">
             <div className="runtime-monitoring-column">
               <div className="capability-tools-head"><b>Recent runtime events</b><small>{runtimeMonitoring.events.length} shown</small></div>
@@ -151,6 +168,30 @@ function App() {
                 <div><b>{event.serverName}</b><small>{new Date(event.inspectedAt).toLocaleString()} · {event.changeCount} change(s)</small></div>
                 <span className={"tool-risk "+String(event.severity??"MEDIUM").toLowerCase()}>{event.severity}</span>
                 <details className="inspection-details"><summary>View detected changes</summary><pre>{event.changesJson}</pre></details>
+              </article>)}
+            </div>
+            <div className="runtime-monitoring-column">
+              <div className="capability-tools-head"><b>Capability and permission drift</b><small>{runtimeMonitoring.capabilityDrift.total} change(s) · {runtimeMonitoring.capabilityDrift.permissionEscalations} escalation(s)</small></div>
+              {runtimeMonitoring.capabilityDrift.events.length===0?<div className="capability-empty">No inferred capability changes recorded.</div>:runtimeMonitoring.capabilityDrift.events.map((event:any)=><article className="runtime-event" key={event.id}>
+                <div><b>{event.toolName??event.title}</b><small>{event.serverId} · {new Date(event.analyzedAt).toLocaleString()}</small></div>
+                <span className={"tool-risk "+String(event.severity??"MEDIUM").toLowerCase()}>{event.result}</span>
+                <small className="runtime-event-detail">Added: {(event.addedCapabilityKeys??[]).join(", ")||"none"} · Removed: {(event.removedCapabilityKeys??[]).join(", ")||"none"}</small>
+                <small className="runtime-event-detail">{event.previousPermissionMode??"—"} → {event.currentPermissionMode??"—"} · {event.previousRiskLevel??"—"} → {event.currentRiskLevel??"—"}</small>
+                <small className="runtime-event-detail">Heuristic comparison only; not proof of tool execution or exploitability.</small>
+              </article>)}
+            </div>
+            <div className="runtime-monitoring-column">
+              <div className="capability-tools-head"><b>Blast-radius changes</b><small>{runtimeMonitoring.blastRadius.total} event(s) · {runtimeMonitoring.blastRadius.expanded} expanded</small></div>
+              {runtimeMonitoring.blastRadius.events.length===0?<div className="capability-empty">No blast-radius changes recorded yet.</div>:runtimeMonitoring.blastRadius.events.map((event:any)=><article className="runtime-event" key={event.id}>
+                <div><b>{event.serverName}</b><small>{new Date(event.observedAt).toLocaleString()}</small></div>
+                <span className={"tool-risk "+String(event.severity??"MEDIUM").toLowerCase()}>{event.result}</span>
+                <small className="runtime-event-detail">Agents added: {(event.addedAgents??[]).join(", ")||"none"} · removed: {(event.removedAgents??[]).join(", ")||"none"}</small>
+                <small className="runtime-event-detail">Capabilities added: {(event.addedCapabilities??[]).join(", ")||"none"} · removed: {(event.removedCapabilities??[]).join(", ")||"none"}</small>
+                <details className="inspection-details"><summary>Before / after graph snapshot</summary><pre>{event.previousSnapshotJson}
+
+→
+
+{event.currentSnapshotJson}</pre></details>
               </article>)}
             </div>
           </div>

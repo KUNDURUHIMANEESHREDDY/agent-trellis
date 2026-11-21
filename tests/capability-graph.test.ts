@@ -146,6 +146,11 @@ describe("AgentGraph capability intelligence", () => {
     const monitoring = graph.getRuntimeMonitoring();
     expect(monitoring.drift.total).toBe(1);
     expect(monitoring.drift.events[0].changeCount).toBe(2);
+    expect(monitoring.capabilityDrift.total).toBe(1);
+    expect(monitoring.capabilityDrift.permissionEscalations).toBe(1);
+    expect(monitoring.capabilityDrift.events[0].addedCapabilityKeys).toContain("filesystem_write");
+    expect(monitoring.blastRadius.total).toBe(1);
+    expect(monitoring.blastRadius.events[0].result).toBe("EXPANDED");
     expect(graph.getCapabilityIntelligence().summary.tools).toBe(2);
 
     inspection("2026-11-20T13:02:00.000Z", [{
@@ -158,6 +163,13 @@ describe("AgentGraph capability intelligence", () => {
       inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } }
     }]);
     expect(graph.getRuntimeMonitoring().drift.total).toBe(1);
+    const association = graph.associateAgentWithMcpServer("agent-support", server.id);
+    expect(association.ok).toBe(true);
+    expect(graph.getRuntimeMonitoring().blastRadius.total).toBe(2);
+    expect(graph.getRuntimeMonitoring().blastRadius.events[0].addedAgents).toContain("agent-support");
+    graph.removeAgentMcpAssociation("agent-support", server.id);
+    expect(graph.getRuntimeMonitoring().blastRadius.total).toBe(3);
+    expect(graph.getRuntimeMonitoring().blastRadius.events[0].removedAgents).toContain("agent-support");
 
     inspection("2026-11-20T13:03:00.000Z", [], false);
     expect(graph.getCapabilityIntelligence().summary.tools).toBe(2);
